@@ -50,7 +50,7 @@ const OPENROUTER_FEATURED = [
   "google/gemini-2.5-pro", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.6:online", "anthropic/claude-opus-4.6-fast",
   "anthropic/claude-opus-4.7", "anthropic/claude-opus-4.7-fast",
   "cohere/command-a", "amazon/nova-premier-v1", "baidu/ernie-4.5-300b-a47b",
-  "z-ai/glm-5.1", "qwen/qwen3.6-plus", "minimax/minimax-m2.7", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro",
+  "z-ai/glm-5.1", "qwen/qwen3.6-plus", "qwen/qwen3.6-max-preview", "minimax/minimax-m2.7", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro",
   "openai/gpt-5.5-pro", "openai/gpt-5.5",
   "openai/gpt-5.4", "openai/gpt-5.4-pro", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano",
   "openai/gpt-5.4-image-2",
