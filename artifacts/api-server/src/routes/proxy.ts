@@ -902,7 +902,10 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           : OPENROUTER_IMAGE_ONLY_MODELS.has(orActualModel)
             ? ["image"] as const
             : undefined;
-        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: { order: ["Bedrock"], allow_fallbacks: true } });
+        const orProviderRouting = orActualModel.startsWith("anthropic/")
+          ? { order: ["Bedrock"], allow_fallbacks: true }
+          : undefined;
+        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: orProviderRouting });
       } else {
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
