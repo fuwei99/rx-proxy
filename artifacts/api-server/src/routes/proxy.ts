@@ -1290,6 +1290,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const startTime = Date.now();
 
   req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled }, "Anthropic /v1/messages request");
+  req.log.info({ payload: JSON.stringify(req.body) }, "Anthropic /v1/messages full payload");
 
   // Build thinking param if needed (and not already provided by client)
   const isAdaptiveThinkingModel = selectedModel.includes("4-6") || selectedModel.includes("4.6") || selectedModel.includes("4-7") || selectedModel.includes("4.7");
