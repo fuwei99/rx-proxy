@@ -841,6 +841,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   for (let attempt = 0; ; attempt++) {
     const backendLabel = backend.kind === "local" ? "local" : backend.label;
     req.log.info({ model: selectedModel, backend: backendLabel, attempt, counter: requestCounter - 1, sillyTavern: isClaudeModel && getSillyTavernMode(), toolCount: tools?.length ?? 0 }, "Proxy request");
+    req.log.info({ payload: JSON.stringify(req.body) }, "Proxy request full payload");
 
     try {
       let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
