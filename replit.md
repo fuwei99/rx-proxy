@@ -2,7 +2,7 @@
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+Corn-Api / Replit2Api — an AI API gateway and management portal. Proxies OpenAI, Anthropic, Gemini, and OpenRouter APIs through a unified endpoint. Pulled from https://github.com/timigohehe-web/Corn-Api.
 
 ## Stack
 
@@ -15,6 +15,21 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
+- **Frontend**: React + Vite + Tailwind CSS (api-portal)
+
+## Artifacts
+
+- `artifacts/api-portal` — Management portal UI (previewPath: `/`). React + Vite.
+- `artifacts/api-server` — Express API server (previewPath: `/api`). Handles AI proxy, settings, and update routes.
+
+## Key Environment Variables
+
+- `PROXY_API_KEY` — Required. The API key clients use to authenticate with this proxy.
+- `AI_INTEGRATIONS_OPENAI_BASE_URL` — OpenAI integration base URL (via Replit integrations)
+- `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` — Anthropic integration base URL
+- `AI_INTEGRATIONS_GEMINI_BASE_URL` — Gemini integration base URL
+- `AI_INTEGRATIONS_OPENROUTER_BASE_URL` — OpenRouter integration base URL
+- `DEFAULT_OBJECT_STORAGE_BUCKET_ID` — GCS bucket for persistent config (optional, falls back to local filesystem)
 
 ## Key Commands
 
