@@ -902,7 +902,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           : OPENROUTER_IMAGE_ONLY_MODELS.has(orActualModel)
             ? ["image"] as const
             : undefined;
-        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities });
+        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: { order: ["Bedrock"], allow_fallbacks: true } });
       } else {
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -1794,7 +1794,7 @@ function normalizeImageResponse(result: Record<string, unknown>): void {
 }
 
 async function handleOpenAI({
-  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, thinkingVisible, imageModalities,
+  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, thinkingVisible, imageModalities, providerRouting,
 }: {
   req: Request;
   res: Response;
@@ -1809,6 +1809,7 @@ async function handleOpenAI({
   reasoning?: { enabled: boolean } | { effort: string };
   thinkingVisible?: boolean;
   imageModalities?: readonly string[];
+  providerRouting?: Record<string, unknown>;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
   const params: Parameters<typeof client.chat.completions.create>[0] = {
     model,
@@ -1820,6 +1821,7 @@ async function handleOpenAI({
   if (toolChoice !== undefined) (params as Record<string, unknown>)["tool_choice"] = toolChoice;
   if (reasoning) (params as Record<string, unknown>)["reasoning"] = reasoning;
   if (imageModalities) (params as Record<string, unknown>)["modalities"] = imageModalities;
+  if (providerRouting) (params as Record<string, unknown>)["provider"] = providerRouting;
 
   // Image models don't support streaming — always return non-streaming response
   // to avoid base64 content being split across SSE chunks incorrectly
