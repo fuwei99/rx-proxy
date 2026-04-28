@@ -802,7 +802,7 @@ function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
 }
 
 router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Response) => {
-  const { model, messages, stream, max_tokens, temperature, top_p, tools, tool_choice, reasoning: clientReasoning } = req.body as {
+  const { model, messages, stream, max_tokens, temperature, top_p, tools, tool_choice, reasoning: clientReasoning, reasoning_effort: clientReasoningEffort } = req.body as {
     model?: string;
     messages: OAIMessage[];
     stream?: boolean;
@@ -812,7 +812,12 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     tools?: OAITool[];
     tool_choice?: unknown;
     reasoning?: { effort?: string; enabled?: boolean };
+    reasoning_effort?: string;
   };
+
+  // Convert top-level reasoning_effort → OpenRouter { effort } format (client-provided reasoning takes priority)
+  const resolvedClientReasoning: { effort: string } | { enabled: boolean } | undefined =
+    clientReasoning ?? (clientReasoningEffort ? { effort: clientReasoningEffort } : undefined);
 
   // Normalize: strip legacy -visible suffix before any other processing
   const selectedModel = model ? stripVisibleSuffix(model) : model;
@@ -895,7 +900,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         }
 
         // Client-provided reasoning takes priority over the model-suffix-derived value
-        const finalOrReasoning = clientReasoning ?? orReasoning;
+        const finalOrReasoning = resolvedClientReasoning ?? orReasoning;
 
         const client = makeLocalOpenRouter();
         const orImageModalities = OPENROUTER_IMAGE_TEXT_MODELS.has(orActualModel)
