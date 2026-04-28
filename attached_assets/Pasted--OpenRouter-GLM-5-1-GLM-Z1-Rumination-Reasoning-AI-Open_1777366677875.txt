@@ -1,0 +1,67 @@
+在 OpenRouter 渠道中，**GLM 5.1**（官方代号 GLM-Z1-Rumination）确实**完全支持**思考（Reasoning）控制。作为智谱 AI 推出的对标 OpenAI "o" 系列和 Claude Opus 的长程推理模型，它的配置逻辑与 Claude 4.7 类似，但具有其特有的参数映射规则。
+
+以下是 GLM 5.1 控制 `max_token`、`reasoning.effort`（推理努力程度）的详细说明和代码：
+
+### 1. 核心控制逻辑
+GLM 5.1 在 OpenRouter 上遵循 **“推理占比”** 逻辑。这意味着：
+*   **总预算制**：你设置的 `max_tokens` 是**总上限**。
+*   **分配比例**：OpenRouter 通过 `reasoning.effort` 来决定把这部分总预算中的多少百分比分配给“思考过程”。
+*   **自适应步长**：GLM 5.1 具有“Rumination（反刍/沉思）”架构，模型会根据 `effort` 级别决定在内部进行多少轮自我校对。
+
+### 2. 参数对比与对应关系
+
+| 参数名称 | 可选值 | 说明 |
+| :--- | :--- | :--- |
+| **`max_tokens`** | 整数 (建议 >8000) | 决定回答的总长度上限（包含思考 + 最终回答）。 |
+| **`reasoning.effort`** | `xhigh`, `high`, `medium`, `low`, `minimal`, `none` | **核心控制项**。决定模型推理的深度。 |
+| **`verbosity`** | 同上 | OpenRouter 的通用别名，GLM 5.1 同样支持。 |
+
+**Effort/Verbosity 级别的影响（GLM 5.1 专用）：**
+*   **`xhigh` (95% 占比)**：分配几乎所有 token 给推理。适合极难的数学证明或 8 小时级别的长程 Agent 任务。
+*   **`high` (80% 占比)**：标准深度推理，适合复杂代码审计。
+*   **`medium` (50% 占比)**：平衡逻辑与输出速度。
+*   **`low` / `minimal`**：快速回答，大幅削减中间思考步骤。
+
+---
+
+### 3. Curl 代码示例
+
+如果你希望 GLM 5.1 开启 **深层思考模式**（例如处理一个极难的编程架构问题）：
+
+```bash
+curl https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "zhipu/glm-5.1",
+    "max_tokens": 16384,
+    "reasoning": {
+      "enabled": true,
+      "effort": "high"
+    },
+    "messages": [
+      {
+        "role": "user", 
+        "content": "请用 Rust 实现一个高性能的 Raft 共识算法，并解释你如何处理网络分区下的脑裂问题。"
+      }
+    ]
+  }'
+```
+
+---
+
+### 4. 关键差异点 (与 Claude 4.7 对比)
+
+虽然配置参数名相似，但 GLM 5.1 的底层行为有所不同：
+
+1.  **Token 消耗逻辑**：
+    *   **Claude 4.7** 是完全自适应的，它可能在 `effort: low` 时依然思考很久，只要它认为有必要。
+    *   **GLM 5.1** 对 `effort` 更敏感。如果你设为 `low`，它会显著缩减思维链的长度，从而节省大量费用。
+2.  **长程任务支持**：
+    *   GLM 5.1 专门针对“8 小时持续运行任务”进行了优化。如果你在做 Agent 调用，建议将 `max_tokens` 设为最高（GLM 5.1 支持最高 64k 的输出 token），并配合 `xhigh` 使用。
+3.  **推理内容的获取**：
+    *   在 OpenRouter 的返回结果中，GLM 5.1 的思考过程会被放在返回对象的 `reasoning_details` 字段或包含在特殊的 `<thought>` 标签中（取决于具体的 Provider 映射）。
+
+### 5. 常见问题：为什么我的设置没生效？
+*   **Provider 限制**：OpenRouter 后端可能有多个 GLM 提供商（如 Zhipu 直接提供或第三方）。部分第三方节点可能不支持 `effort` 参数。如果遇到失效，建议在 OpenRouter 设置中指定特定的顶级 Provider（如 `z-ai`）。
+*   **`max_tokens` 过小**：如果 `max_tokens` 设得太低（例如 500），且 `effort` 是 `high`，模型可能刚写完思考过程就断掉了，拿不到最终答案。建议设置在 **4000** 以上。
