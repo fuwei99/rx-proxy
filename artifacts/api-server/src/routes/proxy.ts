@@ -554,6 +554,22 @@ function writeAndFlush(res: Response, data: string) {
   (res as unknown as { flush?: () => void }).flush?.();
 }
 
+const MAX_DEBUG_LOG_CHARS = 20_000;
+
+function stringifyForDebugLog(payload: unknown): string {
+  try {
+    const serialized = JSON.stringify(payload);
+    if (serialized.length <= MAX_DEBUG_LOG_CHARS) return serialized;
+    return `${serialized.slice(0, MAX_DEBUG_LOG_CHARS)}... [truncated ${serialized.length - MAX_DEBUG_LOG_CHARS} chars]`;
+  } catch {
+    return "[unserializable payload]";
+  }
+}
+
+function logResponseDebug(req: Request, label: string, payload: unknown): void {
+  req.log.info({ response: stringifyForDebugLog(payload) }, label);
+}
+
 async function fakeStreamResponse(
   res: Response,
   json: Record<string, unknown>,
@@ -984,8 +1000,67 @@ const TOOL_ID_MARKER_RE = /<!--\s*tool_id:([^-\s]+?)\s*-->/g;
  * so we can recover it on the next request without scanning history.
  */
 // Block types produced by Anthropic's built-in server-side tools (e.g. web_search_20250305).
-// Forwarded to the client as-is, but stripped from history before re-sending to Claude.
+// Forwarded to the client by default; optionally hidden for specific clients.
 const SERVER_TOOL_BLOCK_TYPES = new Set(["server_tool_use", "web_search_tool_result"]);
+const SEARCH_INVISIBLE_TAG = "<||search-invisible||>";
+
+function stripSearchInvisibleTagFromMessages(messages: AnthropicMessage[]): { messages: AnthropicMessage[]; enabled: boolean } {
+  let enabled = false;
+
+  const cleaned = messages.map((msg) => {
+    if (typeof msg.content === "string") {
+      if (!msg.content.includes(SEARCH_INVISIBLE_TAG)) return msg;
+      enabled = true;
+      return { ...msg, content: msg.content.split(SEARCH_INVISIBLE_TAG).join("") } as AnthropicMessage;
+    }
+
+    if (!Array.isArray(msg.content)) return msg;
+
+    let changed = false;
+    const nextContent = (msg.content as Record<string, unknown>[]).map((block) => {
+      if (block.type !== "text" || typeof block.text !== "string") return block;
+      if (!(block.text as string).includes(SEARCH_INVISIBLE_TAG)) return block;
+      enabled = true;
+      changed = true;
+      return { ...block, text: (block.text as string).split(SEARCH_INVISIBLE_TAG).join("") };
+    });
+
+    if (!changed) return msg;
+    return { ...msg, content: nextContent } as AnthropicMessage;
+  });
+
+  return { messages: cleaned, enabled };
+}
+
+function shouldHideServerToolStreamEvent(
+  event: Record<string, unknown>,
+  hiddenIndexes: Set<number>
+): boolean {
+  const type = event.type as string | undefined;
+  if (!type) return false;
+
+  if (type === "content_block_start") {
+    const index = event.index as number | undefined;
+    const blockType = (event.content_block as { type?: string } | undefined)?.type;
+    if (index !== undefined && blockType && SERVER_TOOL_BLOCK_TYPES.has(blockType)) {
+      hiddenIndexes.add(index);
+      return true;
+    }
+    return false;
+  }
+
+  if (type === "content_block_delta" || type === "content_block_stop") {
+    const index = event.index as number | undefined;
+    return index !== undefined && hiddenIndexes.has(index);
+  }
+
+  return false;
+}
+
+function filterServerToolBlocksInContent(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  return (content as Record<string, unknown>[]).filter((block) => !SERVER_TOOL_BLOCK_TYPES.has((block.type as string) ?? ""));
+}
 
 function injectToolIdMarker(
   content: Record<string, unknown>[]
@@ -1057,10 +1132,6 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
   // ── Pass 2: strip markers, fill tool_use_ids ──
   const result: AnthropicMessage[] = [];
 
-  // IDs of server_tool_use blocks stripped from assistant messages.
-  // Used to drop matching tool_result blocks in subsequent user messages.
-  const strippedServerToolIds = new Set<string>();
-
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
 
@@ -1069,13 +1140,6 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
       const blocks = msg.content as Record<string, unknown>[];
       let lastToolId: string | undefined;
       const cleanContent = blocks.flatMap((block) => {
-        // Strip server-side tool blocks and record their IDs so we can drop
-        // any matching tool_result in the following user message
-        if (SERVER_TOOL_BLOCK_TYPES.has(block.type as string)) {
-          if (typeof block.id === "string") strippedServerToolIds.add(block.id as string);
-          if (typeof block.tool_use_id === "string") strippedServerToolIds.add(block.tool_use_id as string);
-          return [];
-        }
         // Track the last seen tool_use id within this assistant message
         if (block.type === "tool_use" && typeof block.id === "string") {
           lastToolId = block.id as string;
@@ -1122,10 +1186,6 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
 
       for (const block of msg.content as Record<string, unknown>[]) {
         if (block.type === "tool_result") {
-          // Drop tool_result blocks that reference a stripped server_tool_use — no matching tool_use exists
-          if (typeof block.tool_use_id === "string" && strippedServerToolIds.has(block.tool_use_id as string)) {
-            continue;
-          }
           if (block.tool_use_id) {
             sanitizedContent.push(block);
           } else {
@@ -1259,6 +1319,9 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
   const { model, messages, system, stream, max_tokens, tools: clientTools, ...rest } = body;
   const rawModel = stripVisibleSuffix(model ?? "claude-sonnet-4-5");
+  const isSearchModel = /^claude-opus-4[-.]6-search$/i.test(rawModel);
+  const tagged = stripSearchInvisibleTagFromMessages(messages);
+  const hideSearchToolFromClient = isSearchModel && tagged.enabled;
 
   // Reject disabled models
   if (!isModelEnabled(rawModel)) {
@@ -1289,7 +1352,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const shouldStream = stream ?? false;
   const startTime = Date.now();
 
-  req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled }, "Anthropic /v1/messages request");
+  req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled, hideSearchToolFromClient }, "Anthropic /v1/messages request");
   req.log.info({ payload: JSON.stringify(req.body) }, "Anthropic /v1/messages full payload");
 
   // Build thinking param if needed (and not already provided by client)
@@ -1311,7 +1374,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   }
 
   // Sanitize messages: fill in missing tool_use_id on tool_result blocks
-  const sanitizedMessages = sanitizeAnthropicMessages(messages, selectedModel);
+  const sanitizedMessages = sanitizeAnthropicMessages(tagged.messages, selectedModel);
 
   try {
     const client = makeLocalAnthropic();
@@ -1343,7 +1406,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       try {
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
 
+        const hiddenIndexes = new Set<number>();
         for await (const event of claudeStream) {
+          if (hideSearchToolFromClient && shouldHideServerToolStreamEvent(event as unknown as Record<string, unknown>, hiddenIndexes)) {
+            continue;
+          }
+          logResponseDebug(req, "Claude /v1/messages stream response event", event);
           if (event.type === "message_start") {
             inputTokens = event.message.usage.input_tokens;
           } else if (event.type === "message_delta") {
@@ -1366,7 +1434,13 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       }
     } else {
       const rawResult = await client.messages.create(createParams);
-      const resultWithMarkers = rawResult;
+      const resultWithMarkers = hideSearchToolFromClient
+        ? {
+            ...rawResult,
+            content: filterServerToolBlocksInContent((rawResult as unknown as { content?: unknown }).content),
+          }
+        : rawResult;
+      logResponseDebug(req, "Claude /v1/messages non-stream response", resultWithMarkers);
       const usage = (rawResult as { usage?: { input_tokens?: number; output_tokens?: number } }).usage ?? {};
       const dur = Date.now() - startTime;
       recordCallStat("local", dur, usage.input_tokens ?? 0, usage.output_tokens ?? 0, undefined, selectedModel);
@@ -1839,6 +1913,7 @@ async function handleOpenAI({
     const result = await client.chat.completions.create({ ...params, stream: false });
     const resultRecord = result as unknown as Record<string, unknown>;
     normalizeImageResponse(resultRecord);
+    logResponseDebug(req, "OpenAI non-stream response (image stream fallback)", result);
     res.json(result);
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
@@ -1870,9 +1945,11 @@ async function handleOpenAI({
         const orReasoning = delta?.reasoning as string | undefined;
         if (orReasoning) {
           const reasoningChunk = { ...chunk, choices: [{ ...chunk.choices?.[0], delta: { reasoning_content: orReasoning } }] };
+          logResponseDebug(req, "OpenAI stream response chunk", reasoningChunk);
           writeAndFlush(res, `data: ${JSON.stringify(reasoningChunk)}\n\n`);
           continue;
         }
+        logResponseDebug(req, "OpenAI stream response chunk", chunk);
         writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
       }
       writeAndFlush(res, "data: [DONE]\n\n");
@@ -1882,6 +1959,7 @@ async function handleOpenAI({
       if (res.headersSent || !routingSettings.fakeStream) throw streamErr;
       req.log.warn({ err: streamErr }, "Real streaming failed, falling back to fake-stream");
       const result = await client.chat.completions.create({ ...params, stream: false });
+      logResponseDebug(req, "OpenAI non-stream response (fake-stream fallback)", result);
       return fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
     }
   } else {
@@ -1900,6 +1978,7 @@ async function handleOpenAI({
     }
     // Image models: normalize message.images[] → message.content[] image_url parts
     if (imageModalities) normalizeImageResponse(resultRecord);
+    logResponseDebug(req, "OpenAI non-stream response", result);
     res.json(result);
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
@@ -2192,6 +2271,7 @@ async function handleClaude({
       let toolCallCount = 0;
 
       for await (const event of claudeStream) {
+        logResponseDebug(req, "Claude stream response event", event);
         if (event.type === "message_start") {
           inputTokens = event.message.usage.input_tokens;
           writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`);
@@ -2244,6 +2324,7 @@ async function handleClaude({
     let result: Anthropic.Message;
     try {
       result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0], requestOptions);
+      logResponseDebug(req, "Claude non-stream response", result);
     } catch (nonStreamErr: unknown) {
       const errMsg = nonStreamErr instanceof Error ? nonStreamErr.message : String(nonStreamErr);
       if (/streaming.*required|requires.*stream/i.test(errMsg)) {
@@ -2251,6 +2332,7 @@ async function handleClaude({
         const claudeStream = client.messages.stream(buildCreateParams() as Parameters<typeof client.messages.stream>[0], requestOptions);
         const collected = await claudeStream.finalMessage();
         result = collected;
+        logResponseDebug(req, "Claude non-stream response (stream-collect fallback)", result);
       } else {
         throw nonStreamErr;
       }
@@ -2284,7 +2366,7 @@ async function handleClaude({
     const stopReason = result.stop_reason;
     const finishReason = stopReason === "tool_use" ? "tool_calls" : (stopReason ?? "stop");
 
-    res.json({
+    const responseJson = {
       id: result.id,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
@@ -2304,7 +2386,9 @@ async function handleClaude({
         completion_tokens: result.usage.output_tokens,
         total_tokens: result.usage.input_tokens + result.usage.output_tokens,
       },
-    });
+    };
+    logResponseDebug(req, "Claude OpenAI-compatible response", responseJson);
+    res.json(responseJson);
     return { promptTokens: result.usage.input_tokens, completionTokens: result.usage.output_tokens };
   }
 }
