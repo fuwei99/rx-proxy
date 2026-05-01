@@ -1003,15 +1003,22 @@ const TOOL_ID_MARKER_RE = /<!--\s*tool_id:([^-\s]+?)\s*-->/g;
 // Forwarded to the client by default; optionally hidden for specific clients.
 const SERVER_TOOL_BLOCK_TYPES = new Set(["server_tool_use", "web_search_tool_result"]);
 const SEARCH_INVISIBLE_TAG = "<||search-invisible||>";
+const SEARCH_VISIBLE_TAG = "<||search-visible||>";
 
-function stripSearchInvisibleTagFromMessages(messages: AnthropicMessage[]): { messages: AnthropicMessage[]; enabled: boolean } {
-  let enabled = false;
+function stripSearchControlTagsFromMessages(messages: AnthropicMessage[]): { messages: AnthropicMessage[]; invisibleEnabled: boolean; visibleEnabled: boolean } {
+  let invisibleEnabled = false;
+  let visibleEnabled = false;
+  const tags = [SEARCH_INVISIBLE_TAG, SEARCH_VISIBLE_TAG];
 
   const cleaned = messages.map((msg) => {
     if (typeof msg.content === "string") {
-      if (!msg.content.includes(SEARCH_INVISIBLE_TAG)) return msg;
-      enabled = true;
-      return { ...msg, content: msg.content.split(SEARCH_INVISIBLE_TAG).join("") } as AnthropicMessage;
+      const textContent = msg.content;
+      if (!tags.some((t) => textContent.includes(t))) return msg;
+      if (textContent.includes(SEARCH_INVISIBLE_TAG)) invisibleEnabled = true;
+      if (textContent.includes(SEARCH_VISIBLE_TAG)) visibleEnabled = true;
+      let content = textContent;
+      for (const tag of tags) content = content.split(tag).join("");
+      return { ...msg, content } as AnthropicMessage;
     }
 
     if (!Array.isArray(msg.content)) return msg;
@@ -1019,17 +1026,21 @@ function stripSearchInvisibleTagFromMessages(messages: AnthropicMessage[]): { me
     let changed = false;
     const nextContent = (msg.content as Record<string, unknown>[]).map((block) => {
       if (block.type !== "text" || typeof block.text !== "string") return block;
-      if (!(block.text as string).includes(SEARCH_INVISIBLE_TAG)) return block;
-      enabled = true;
+      const text = block.text as string;
+      if (!tags.some((t) => text.includes(t))) return block;
+      if (text.includes(SEARCH_INVISIBLE_TAG)) invisibleEnabled = true;
+      if (text.includes(SEARCH_VISIBLE_TAG)) visibleEnabled = true;
       changed = true;
-      return { ...block, text: (block.text as string).split(SEARCH_INVISIBLE_TAG).join("") };
+      let cleanedText = text;
+      for (const tag of tags) cleanedText = cleanedText.split(tag).join("");
+      return { ...block, text: cleanedText };
     });
 
     if (!changed) return msg;
     return { ...msg, content: nextContent } as AnthropicMessage;
   });
 
-  return { messages: cleaned, enabled };
+  return { messages: cleaned, invisibleEnabled, visibleEnabled };
 }
 
 function shouldHideServerToolStreamEvent(
@@ -1060,6 +1071,64 @@ function shouldHideServerToolStreamEvent(
 function filterServerToolBlocksInContent(content: unknown): unknown {
   if (!Array.isArray(content)) return content;
   return (content as Record<string, unknown>[]).filter((block) => !SERVER_TOOL_BLOCK_TYPES.has((block.type as string) ?? ""));
+}
+
+function summarizeUnknownForReference(value: unknown, maxChars = 1200): string {
+  let s: string;
+  if (typeof value === "string") s = value;
+  else s = stringifyForDebugLog(value);
+  if (s.length <= maxChars) return s;
+  return `${s.slice(0, maxChars)}...`;
+}
+
+function extractServerToolReferenceText(block: Record<string, unknown>): string | null {
+  const blockType = (block.type as string) ?? "";
+  if (!SERVER_TOOL_BLOCK_TYPES.has(blockType)) return null;
+
+  if (blockType === "web_search_tool_result") {
+    const payload = block.content ?? block.result ?? block;
+    const text = summarizeUnknownForReference(payload);
+    return text.trim() ? text : null;
+  }
+
+  const toolName = typeof block.name === "string" ? block.name : "server_tool_use";
+  const inputText = block.input !== undefined ? summarizeUnknownForReference(block.input) : "";
+  return inputText ? `[${toolName}] ${inputText}` : `[${toolName}]`;
+}
+
+function collectServerToolReferencesFromContent(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  const refs: string[] = [];
+  for (const block of content as Record<string, unknown>[]) {
+    const ref = extractServerToolReferenceText(block);
+    if (ref) refs.push(ref);
+  }
+  return refs;
+}
+
+function buildSearchReferenceAppendix(references: string[]): string {
+  if (references.length === 0) return "";
+  const lines = references.map((ref, idx) => `- [${idx + 1}] ${ref}`);
+  return `---\n工具调用的结果（references）：\n${lines.join("\n")}`;
+}
+
+function appendReferencesToAssistantContent(content: unknown, references: string[]): unknown {
+  if (!Array.isArray(content) || references.length === 0) return content;
+
+  const blocks = [...(content as Record<string, unknown>[])];
+  const appendix = buildSearchReferenceAppendix(references);
+  if (!appendix) return blocks;
+
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block.type === "text" && typeof block.text === "string") {
+      blocks[i] = { ...block, text: `${block.text}\n\n${appendix}` };
+      return blocks;
+    }
+  }
+
+  blocks.push({ type: "text", text: appendix });
+  return blocks;
 }
 
 function injectToolIdMarker(
@@ -1320,8 +1389,9 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const { model, messages, system, stream, max_tokens, tools: clientTools, ...rest } = body;
   const rawModel = stripVisibleSuffix(model ?? "claude-sonnet-4-5");
   const isSearchModel = /^claude-opus-4[-.]6-search$/i.test(rawModel);
-  const tagged = stripSearchInvisibleTagFromMessages(messages);
-  const hideSearchToolFromClient = isSearchModel && tagged.enabled;
+  const tagged = stripSearchControlTagsFromMessages(messages);
+  const appendSearchReferenceText = isSearchModel && tagged.visibleEnabled;
+  const hideSearchToolFromClient = isSearchModel && (tagged.invisibleEnabled || tagged.visibleEnabled);
 
   // Reject disabled models
   if (!isModelEnabled(rawModel)) {
@@ -1352,7 +1422,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const shouldStream = stream ?? false;
   const startTime = Date.now();
 
-  req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled, hideSearchToolFromClient }, "Anthropic /v1/messages request");
+  req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled, hideSearchToolFromClient, appendSearchReferenceText }, "Anthropic /v1/messages request");
   req.log.info({ payload: JSON.stringify(req.body) }, "Anthropic /v1/messages full payload");
 
   // Build thinking param if needed (and not already provided by client)
@@ -1407,8 +1477,31 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
 
         const hiddenIndexes = new Set<number>();
+        const hiddenServerBlocks = new Map<number, { startBlock: Record<string, unknown>; textChunks: string[] }>();
+        let maxContentBlockIndex = -1;
         for await (const event of claudeStream) {
-          if (hideSearchToolFromClient && shouldHideServerToolStreamEvent(event as unknown as Record<string, unknown>, hiddenIndexes)) {
+          const eventRecord = event as unknown as Record<string, unknown>;
+          const eventType = eventRecord.type as string | undefined;
+          const eventIndex = eventRecord.index as number | undefined;
+          if (typeof eventIndex === "number") maxContentBlockIndex = Math.max(maxContentBlockIndex, eventIndex);
+
+          if (hideSearchToolFromClient && shouldHideServerToolStreamEvent(eventRecord, hiddenIndexes)) {
+            if (appendSearchReferenceText && eventType === "content_block_start" && typeof eventIndex === "number") {
+              hiddenServerBlocks.set(eventIndex, {
+                startBlock: (eventRecord.content_block as Record<string, unknown> | undefined) ?? {},
+                textChunks: [],
+              });
+            } else if (appendSearchReferenceText && eventType === "content_block_delta" && typeof eventIndex === "number") {
+              const state = hiddenServerBlocks.get(eventIndex);
+              const delta = eventRecord.delta as Record<string, unknown> | undefined;
+              if (state && delta) {
+                if (delta.type === "text_delta" && typeof delta.text === "string") {
+                  state.textChunks.push(delta.text);
+                } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+                  state.textChunks.push(delta.partial_json);
+                }
+              }
+            }
             continue;
           }
           logResponseDebug(req, "Claude /v1/messages stream response event", event);
@@ -1419,6 +1512,27 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
           }
 
           writeAndFlush(res, `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+        }
+
+        if (appendSearchReferenceText && hiddenServerBlocks.size > 0) {
+          const refs = [...hiddenServerBlocks.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([, state]) => {
+              const joined = state.textChunks.join("").trim();
+              return joined || extractServerToolReferenceText(state.startBlock) || "";
+            })
+            .filter((s) => !!s);
+
+          const appendix = buildSearchReferenceAppendix(refs);
+          if (appendix) {
+            const appendIndex = maxContentBlockIndex + 1;
+            const startEvent = { type: "content_block_start", index: appendIndex, content_block: { type: "text", text: "" } };
+            const deltaEvent = { type: "content_block_delta", index: appendIndex, delta: { type: "text_delta", text: `\n\n${appendix}` } };
+            const stopEvent = { type: "content_block_stop", index: appendIndex };
+            writeAndFlush(res, `event: content_block_start\ndata: ${JSON.stringify(startEvent)}\n\n`);
+            writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify(deltaEvent)}\n\n`);
+            writeAndFlush(res, `event: content_block_stop\ndata: ${JSON.stringify(stopEvent)}\n\n`);
+          }
         }
         writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
         res.end();
@@ -1434,12 +1548,21 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       }
     } else {
       const rawResult = await client.messages.create(createParams);
-      const resultWithMarkers = hideSearchToolFromClient
+      const rawContent = (rawResult as unknown as { content?: unknown }).content;
+      const resultWithMarkers = appendSearchReferenceText
         ? {
             ...rawResult,
-            content: filterServerToolBlocksInContent((rawResult as unknown as { content?: unknown }).content),
+            content: appendReferencesToAssistantContent(
+              filterServerToolBlocksInContent(rawContent),
+              collectServerToolReferencesFromContent(rawContent)
+            ),
           }
-        : rawResult;
+        : hideSearchToolFromClient
+          ? {
+              ...rawResult,
+              content: filterServerToolBlocksInContent(rawContent),
+            }
+          : rawResult;
       logResponseDebug(req, "Claude /v1/messages non-stream response", resultWithMarkers);
       const usage = (rawResult as { usage?: { input_tokens?: number; output_tokens?: number } }).usage ?? {};
       const dur = Date.now() - startTime;
