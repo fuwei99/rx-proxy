@@ -993,7 +993,8 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const modelMax = is300k ? 300000 : (CLAUDE_MODEL_MAX[resolvedModel] ?? 32000);
         const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
         const client = makeLocalAnthropic();
-        result = await handleClaude({ req, res, client, model: resolvedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, temperature, topP: top_p, thinking: thinkingEnabled, thinkingVisible: thinkingEnabled, tools, toolChoice: tool_choice, webSearch, use300k: is300k, startTime });
+        const cacheControl = cache_control ?? { type: "ephemeral" };
+        result = await handleClaude({ req, res, client, model: resolvedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, temperature, topP: top_p, thinking: thinkingEnabled, thinkingVisible: thinkingEnabled, tools, toolChoice: tool_choice, webSearch, use300k: is300k, cacheControl, startTime });
       } else if (isGeminiModel) {
         const thinkingEnabled = selectedModel.endsWith("-thinking");
         const actualModel = thinkingEnabled ? selectedModel.replace(/-thinking$/, "") : selectedModel;
@@ -1517,11 +1518,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
     max_tokens?: number;
     temperature?: number;
     thinking?: { type: "enabled"; budget_tokens: number };
+    cache_control?: { type?: string };
     tools?: unknown[];
     [key: string]: unknown;
   };
 
-  const { model, messages, system, stream, max_tokens, tools: clientTools, ...rest } = body;
+  const { model, messages, system, stream, max_tokens, cache_control, tools: clientTools, ...rest } = body;
   const rawModel = stripVisibleSuffix(model ?? "claude-sonnet-4-5");
   const isSearchModel = /^claude-opus-4[-.]6-search$/i.test(rawModel);
   const tagged = stripSearchControlTagsFromMessages(messages);
@@ -1577,6 +1579,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   if (safeRest.temperature !== undefined && safeRest.top_p !== undefined) {
     delete safeRest.top_p;
   }
+  const cacheControl = cache_control ?? { type: "ephemeral" };
 
   // Sanitize messages: fill in missing tool_use_id on tool_result blocks
   const sanitizedMessages = sanitizeAnthropicMessages(tagged.messages, selectedModel);
@@ -1589,6 +1592,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       max_tokens: maxTokens,
       messages: sanitizedMessages,
       ...(system ? { system } : {}),
+      ...(cacheControl ? { cache_control: cacheControl } : {}),
       ...thinkingParam,
       ...(mergedTools.length ? { tools: mergedTools } : {}),
       ...safeRest,
@@ -2468,6 +2472,7 @@ async function handleClaude({
   cacheControl?: { type?: string };
   startTime: number;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
+  const effectiveCacheControl = cacheControl ?? { type: "ephemeral" };
   // Extract system prompt
   const systemMessages = messages
     .filter((m) => m.role === "system")
@@ -2524,7 +2529,7 @@ async function handleClaude({
     messages: chatMessages,
     ...(allAnthropicTools?.length ? { tools: allAnthropicTools } : {}),
     ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice } : {}),
-    ...(cacheControl ? { cache_control: cacheControl } : {}),
+    ...(effectiveCacheControl ? { cache_control: effectiveCacheControl } : {}),
   });
 
   const msgId = `msg_${Date.now()}`;
