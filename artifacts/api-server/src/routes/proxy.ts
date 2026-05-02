@@ -811,49 +811,6 @@ type OAIMessage =
   | { role: "tool"; content: string; tool_call_id: string }
   | { role: string; content: string | OAIContentPart[] | null };
 
-function addMissingThinkingSignatures(messages: OAIMessage[]): OAIMessage[] {
-  return messages.map((msg) => {
-    if (!Array.isArray(msg.content)) return msg;
-    let changed = false;
-    const nextContent = msg.content.map((part) => {
-      if (!part || typeof part !== "object") return part;
-      const record = part as Record<string, unknown>;
-      const hasThinkingPayload =
-        typeof record.thinking === "string"
-        || typeof record.reasoning === "string"
-        || record.type === "thinking"
-        || record.type === "reasoning";
-      if (
-        hasThinkingPayload
-        && (record.signature === undefined || record.signature === null || record.signature === "")
-      ) {
-        changed = true;
-        return { ...record, signature: "skip_thought_signature_validator" };
-      }
-      return part;
-    });
-    if (!changed) return msg;
-    return { ...msg, content: nextContent };
-  });
-}
-
-function stripThinkingBlocks(messages: OAIMessage[]): OAIMessage[] {
-  return messages.map((msg) => {
-    if (!Array.isArray(msg.content)) return msg;
-    const nextContent = msg.content.filter((part) => {
-      if (!part || typeof part !== "object") return true;
-      const record = part as Record<string, unknown>;
-      const isThinkingBlock =
-        record.type === "thinking"
-        || record.type === "reasoning"
-        || typeof record.thinking === "string"
-        || typeof record.reasoning === "string";
-      return !isThinkingBlock;
-    });
-    return { ...msg, content: nextContent };
-  });
-}
-
 type AnthropicImageSource =
   | { type: "base64"; media_type: string; data: string }
   | { type: "url"; url: string };
@@ -1329,6 +1286,12 @@ function modelNoPrefill(model: string): boolean {
 }
 
 function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string): AnthropicMessage[] {
+  const dropInvalidThinkingBlocks = (blocks: Record<string, unknown>[]): Record<string, unknown>[] =>
+    blocks.filter((b) => {
+      if (b.type !== "thinking") return true;
+      return typeof b.signature === "string" && b.signature.trim().length > 0;
+    });
+
   // ── Pass 1: collect marker-based ids & fallback tool_use ids per message ──
   type IdSource = { ids: string[]; msgIndex: number };
   const markerIdsByMsg = new Map<number, IdSource>(); // assistant msgIndex → ids from markers
@@ -1362,10 +1325,13 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    const normalizedMsg = Array.isArray(msg.content)
+      ? { ...msg, content: dropInvalidThinkingBlocks(msg.content as Record<string, unknown>[]) }
+      : msg;
 
     // Fix assistant message content: strip markers from text, fill missing tool_use_ids
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      const blocks = msg.content as Record<string, unknown>[];
+    if (normalizedMsg.role === "assistant" && Array.isArray(normalizedMsg.content)) {
+      const blocks = normalizedMsg.content as Record<string, unknown>[];
       let lastToolId: string | undefined;
       const cleanContent = blocks.flatMap((block) => {
         // Track the last seen tool_use id within this assistant message
@@ -1388,12 +1354,12 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
         }
         return [block];
       });
-      result.push({ ...msg, content: cleanContent } as AnthropicMessage);
+      result.push({ ...normalizedMsg, content: cleanContent } as AnthropicMessage);
       continue;
     }
 
     // For user messages that may contain tool_result blocks
-    if (msg.role === "user" && Array.isArray(msg.content)) {
+    if (normalizedMsg.role === "user" && Array.isArray(normalizedMsg.content)) {
       // Determine which id pool to use: prefer marker ids from immediately preceding assistant msg
       const prevIdx = i - 1;
       const idPool: string[] = (
@@ -1412,7 +1378,7 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
       let idIndex = 0;
       const sanitizedContent: unknown[] = [];
 
-      for (const block of msg.content as Record<string, unknown>[]) {
+      for (const block of normalizedMsg.content as Record<string, unknown>[]) {
         if (block.type === "tool_result") {
           if (block.tool_use_id) {
             sanitizedContent.push(block);
@@ -1434,23 +1400,23 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
       );
 
       if (finalContent.length > 0) {
-        result.push({ ...msg, content: finalContent } as AnthropicMessage);
+        result.push({ ...normalizedMsg, content: finalContent } as AnthropicMessage);
       }
       continue;
     }
 
     // Fallback: pass through other messages but still strip empty text blocks
-    if (Array.isArray(msg.content)) {
-      const cleaned = (msg.content as Record<string, unknown>[]).filter(
+    if (Array.isArray(normalizedMsg.content)) {
+      const cleaned = (normalizedMsg.content as Record<string, unknown>[]).filter(
         (b) => !(b.type === "text" && (b.text === "" || b.text == null))
       );
       if (cleaned.length > 0) {
-        result.push({ ...msg, content: cleaned } as AnthropicMessage);
+        result.push({ ...normalizedMsg, content: cleaned } as AnthropicMessage);
       }
       continue;
     }
 
-    result.push(msg);
+    result.push(normalizedMsg as AnthropicMessage);
   }
 
   // ── Pass 3: drop orphaned tool_use / tool_result blocks ──
@@ -2337,45 +2303,30 @@ async function handleOpenRouterFetch({
   }
 
   const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
-  const normalizedMessages = addMissingThinkingSignatures(messages);
-  const buildPayload = (outgoingMessages: OAIMessage[]): Record<string, unknown> => {
-    const payload: Record<string, unknown> = {
-      model,
-      messages: outgoingMessages,
-      stream,
-    };
-    if (maxTokens) payload.max_tokens = maxTokens;
-    if (tools?.length) payload.tools = tools;
-    if (toolChoice !== undefined) payload.tool_choice = toolChoice;
-    if (reasoning) payload.reasoning = reasoning;
-    if (providerRouting) payload.provider = providerRouting;
-    if (cacheControl) payload.cache_control = cacheControl;
-    return payload;
+  const payload: Record<string, unknown> = {
+    model,
+    messages,
+    stream,
   };
+  if (maxTokens) payload.max_tokens = maxTokens;
+  if (tools?.length) payload.tools = tools;
+  if (toolChoice !== undefined) payload.tool_choice = toolChoice;
+  if (reasoning) payload.reasoning = reasoning;
+  if (providerRouting) payload.provider = providerRouting;
+  if (cacheControl) payload.cache_control = cacheControl;
 
-  const postToOpenRouter = (outgoingMessages: OAIMessage[]) => fetch(endpoint, {
+  const upstream = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(buildPayload(outgoingMessages)),
+    body: JSON.stringify(payload),
   });
-
-  let upstream = await postToOpenRouter(normalizedMessages);
 
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => "");
-    if (errText.includes(".signature: Field required")) {
-      const fallbackMessages = stripThinkingBlocks(normalizedMessages);
-      upstream = await postToOpenRouter(fallbackMessages);
-      if (!upstream.ok) {
-        const fallbackErrText = await upstream.text().catch(() => "");
-        throw new Error(`OpenRouter error ${upstream.status}: ${fallbackErrText}`);
-      }
-    } else {
-      throw new Error(`OpenRouter error ${upstream.status}: ${errText}`);
-    }
+    throw new Error(`OpenRouter error ${upstream.status}: ${errText}`);
   }
 
   if (!stream) {
