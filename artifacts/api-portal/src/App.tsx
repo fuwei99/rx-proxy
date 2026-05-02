@@ -594,12 +594,30 @@ type ModelStat = {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
 };
+type RequestLog = {
+  id: number;
+  time: string;
+  method: string;
+  path: string;
+  model?: string;
+  backend?: string;
+  status: number;
+  duration: number;
+  stream: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+};
 
 function PageStats({
   baseUrl, apiKey, stats, statsError, onRefresh,
   addUrl, setAddUrl, addState, addMsg, onAddBackend, onRemoveBackend,
   onToggleBackend, onBatchToggle, onBatchRemove,
-  routing, onToggleRouting, modelStats,
+  routing, onToggleRouting, modelStats, requestLogs,
 }: {
   baseUrl: string;
   apiKey: string;
@@ -618,10 +636,12 @@ function PageStats({
   routing: { localEnabled: boolean; localFallback: boolean; fakeStream: boolean };
   onToggleRouting: (field: "localEnabled" | "localFallback" | "fakeStream", value: boolean) => void;
   modelStats: Record<string, ModelStat> | null;
+  requestLogs: RequestLog[];
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [envPromptCopied, setEnvPromptCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [selectedNode, setSelectedNode] = useState("local");
 
   const ENV_NODE_PROMPT =
     `请在当前 Replit 项目中添加一个环境变量，将子节点注册为永久 ENV 节点（Publish 后不会丢失）：\n\n` +
@@ -723,6 +743,65 @@ function PageStats({
   const subNumStyle: React.CSSProperties = {
     fontSize: "12px", color: "#475569", marginTop: "2px",
   };
+
+  const nodeLabels = stats ? Object.keys(stats) : [];
+  const activeNode = (stats && stats[selectedNode]) ? selectedNode : (nodeLabels[0] ?? "local");
+  const nodeLogs = requestLogs
+    .filter((l) => (l.backend ?? "local") === activeNode)
+    .slice(-80)
+    .reverse();
+
+  const modelPalette = ["#818cf8", "#34d399", "#f59e0b", "#f472b6", "#22d3ee", "#a78bfa", "#fb7185", "#4ade80"];
+  const allModelRows = modelStats
+    ? Object.entries(modelStats)
+      .filter(([, ms]) => ms.calls > 0)
+      .map(([model, ms]) => {
+        const input = ms.promptTokens ?? 0;
+        const output = ms.completionTokens ?? 0;
+        const cached = ms.cachedTokens ?? 0;
+        const cacheWrite = ms.cacheWriteTokens ?? 0;
+        const total = input + output;
+        return { model, calls: ms.calls, input, output, total, cached, cacheWrite, cost: ms.totalCostUsd ?? 0 };
+      })
+      .sort((a, b) => b.total - a.total)
+    : [];
+
+  const topModels = allModelRows.slice(0, 6);
+  const colorByModel = new Map(topModels.map((m, idx) => [m.model, modelPalette[idx % modelPalette.length]]));
+
+  const successfulLogs = requestLogs.filter((l) => (l.status < 500) && !!l.model);
+  const bucketMs = 5 * 60 * 1000;
+  const bucketMap = new Map<number, { ts: number; label: string; calls: Record<string, number>; tokens: Record<string, number> }>();
+  for (const log of successfulLogs) {
+    const t = Date.parse(log.time);
+    if (!Number.isFinite(t)) continue;
+    const ts = Math.floor(t / bucketMs) * bucketMs;
+    const d = new Date(ts);
+    const label = `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+    if (!bucketMap.has(ts)) bucketMap.set(ts, { ts, label, calls: {}, tokens: {} });
+    const b = bucketMap.get(ts)!;
+    const model = log.model!;
+    if (!colorByModel.has(model)) continue;
+    b.calls[model] = (b.calls[model] ?? 0) + 1;
+    b.tokens[model] = (b.tokens[model] ?? 0) + (log.totalTokens ?? ((log.promptTokens ?? 0) + (log.completionTokens ?? 0)));
+  }
+  const timeBuckets = [...bucketMap.values()].sort((a, b) => a.ts - b.ts).slice(-12);
+  const maxCallStack = Math.max(1, ...timeBuckets.map((b) => Object.values(b.calls).reduce((x, y) => x + y, 0)));
+  const maxTokenStack = Math.max(1, ...timeBuckets.map((b) => Object.values(b.tokens).reduce((x, y) => x + y, 0)));
+
+  const tokenShareTotal = topModels.reduce((sum, m) => sum + m.total, 0);
+  const tokenShareGradient = tokenShareTotal > 0
+    ? (() => {
+      let acc = 0;
+      return topModels.map((m) => {
+        const pct = (m.total / tokenShareTotal) * 100;
+        const start = acc;
+        acc += pct;
+        const color = colorByModel.get(m.model) ?? "#818cf8";
+        return `${color} ${start.toFixed(2)}% ${acc.toFixed(2)}%`;
+      }).join(", ");
+    })()
+    : "#1f2937 0% 100%";
 
   return (
     <>
@@ -932,12 +1011,17 @@ function PageStats({
                   const isEnabled = s.enabled !== false;
                   const isHealthy = s.health === "healthy";
                   const cost = s.totalCostUsd ?? 0;
+                  const isSelectedNode = activeNode === label;
                   return (
-                    <div key={label} style={{
+                    <div key={label} onClick={() => setSelectedNode(label)} style={{
                       background: isEnabled ? "rgba(0,0,0,0.2)" : "rgba(0,0,0,0.35)",
-                      border: `1px solid ${isEnabled ? "rgba(255,255,255,0.06)" : "rgba(248,113,113,0.15)"}`,
+                      border: isSelectedNode
+                        ? "1px solid rgba(129,140,248,0.45)"
+                        : `1px solid ${isEnabled ? "rgba(255,255,255,0.06)" : "rgba(248,113,113,0.15)"}`,
                       borderRadius: "10px", padding: "14px 16px",
                       opacity: isEnabled ? 1 : 0.6,
+                      cursor: "pointer",
+                      boxShadow: isSelectedNode ? "0 0 0 1px rgba(129,140,248,0.2), inset 0 0 30px rgba(99,102,241,0.05)" : "none",
                     }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
                         <div style={{
@@ -974,6 +1058,161 @@ function PageStats({
               </div>
             )}
           </Card>
+
+          <Card style={{ marginBottom: "14px" }}>
+            <SectionTitle>节点调用详情</SectionTitle>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
+              {nodeLabels.map((label) => (
+                <button
+                  key={label}
+                  onClick={() => setSelectedNode(label)}
+                  style={{
+                    padding: "4px 10px", borderRadius: "999px", fontSize: "11px", cursor: "pointer",
+                    border: activeNode === label ? "1px solid rgba(129,140,248,0.55)" : "1px solid rgba(255,255,255,0.12)",
+                    background: activeNode === label ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.03)",
+                    color: activeNode === label ? "#c7d2fe" : "#64748b",
+                    fontFamily: "'JetBrains Mono', Menlo, monospace",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {nodeLogs.length === 0 ? (
+              <div style={{ fontSize: "12px", color: "#475569" }}>该节点暂无调用记录</div>
+            ) : (
+              <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px" }}>
+                {nodeLogs.map((l) => (
+                  <div key={l.id} style={{
+                    display: "grid",
+                    gridTemplateColumns: "96px 1fr 60px 80px 120px",
+                    gap: "10px",
+                    padding: "8px 10px",
+                    borderBottom: "1px solid rgba(255,255,255,0.05)",
+                    alignItems: "center",
+                    fontSize: "11.5px",
+                  }}>
+                    <span style={{ color: "#64748b", fontFamily: "Menlo, monospace" }}>{new Date(l.time).toLocaleTimeString()}</span>
+                    <span style={{ color: "#94a3b8", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={l.model ?? "-"}>{l.model ?? "-"}</span>
+                    <span style={{ color: l.status >= 500 ? "#f87171" : "#4ade80" }}>{l.status}</span>
+                    <span style={{ color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{l.duration}ms</span>
+                    <span style={{ color: "#34d399", fontFamily: "Menlo, monospace" }}>
+                      {(l.totalTokens ?? ((l.promptTokens ?? 0) + (l.completionTokens ?? 0))).toLocaleString()} tk
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card style={{ marginBottom: "14px" }}>
+            <SectionTitle>分模型 Token / 缓存</SectionTitle>
+            {allModelRows.length === 0 ? (
+              <div style={{ fontSize: "12px", color: "#475569" }}>暂无模型维度数据</div>
+            ) : (
+              <div style={{ maxHeight: "260px", overflowY: "auto", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1.4fr repeat(6, minmax(68px, 1fr))", gap: "8px", padding: "8px 10px", fontSize: "10px", color: "#64748b", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                  <span>模型</span><span>调用</span><span>输入</span><span>输出</span><span>缓存命中</span><span>缓存写入</span><span>开销</span>
+                </div>
+                {allModelRows.map((row) => (
+                  <div key={row.model} style={{ display: "grid", gridTemplateColumns: "1.4fr repeat(6, minmax(68px, 1fr))", gap: "8px", padding: "8px 10px", fontSize: "11.5px", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                    <span style={{ color: "#94a3b8", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.model}>{row.model}</span>
+                    <span style={{ color: "#cbd5e1" }}>{row.calls}</span>
+                    <span style={{ color: "#34d399", fontFamily: "Menlo, monospace" }}>{fmt(row.input)}</span>
+                    <span style={{ color: "#34d399", fontFamily: "Menlo, monospace" }}>{fmt(row.output)}</span>
+                    <span style={{ color: "#22c55e", fontFamily: "Menlo, monospace" }}>{fmt(row.cached)}</span>
+                    <span style={{ color: "#06b6d4", fontFamily: "Menlo, monospace" }}>{fmt(row.cacheWrite)}</span>
+                    <span style={{ color: "#f59e0b", fontFamily: "Menlo, monospace" }}>${row.cost.toFixed(4)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "12px", marginBottom: "14px" }}>
+            <Card style={{ marginBottom: 0 }}>
+              <SectionTitle>时间堆叠柱图（模型）</SectionTitle>
+              {timeBuckets.length === 0 || topModels.length === 0 ? (
+                <div style={{ fontSize: "12px", color: "#475569" }}>日志不足，暂无可视化数据</div>
+              ) : (
+                <>
+                  <div style={{ marginBottom: "8px", fontSize: "11px", color: "#94a3b8" }}>调用次数（5分钟桶）</div>
+                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(18px, 1fr))`, gap: "8px", alignItems: "end", height: "110px", marginBottom: "14px" }}>
+                    {timeBuckets.map((bucket) => {
+                      const total = Object.values(bucket.calls).reduce((a, b) => a + b, 0);
+                      return (
+                        <div key={`c-${bucket.ts}`} title={`${bucket.label} · calls ${total}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", gap: "4px" }}>
+                          <div style={{ width: "100%", height: "92px", borderRadius: "6px", background: "rgba(255,255,255,0.04)", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
+                            {topModels.map((m) => {
+                              const v = bucket.calls[m.model] ?? 0;
+                              if (v <= 0) return null;
+                              return <div key={m.model} style={{ height: `${(v / maxCallStack) * 100}%`, background: colorByModel.get(m.model) }} />;
+                            })}
+                          </div>
+                          <span style={{ fontSize: "10px", color: "#475569" }}>{bucket.label.slice(3)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ marginBottom: "8px", fontSize: "11px", color: "#94a3b8" }}>Token 消耗（5分钟桶）</div>
+                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(18px, 1fr))`, gap: "8px", alignItems: "end", height: "110px" }}>
+                    {timeBuckets.map((bucket) => {
+                      const total = Object.values(bucket.tokens).reduce((a, b) => a + b, 0);
+                      return (
+                        <div key={`t-${bucket.ts}`} title={`${bucket.label} · tokens ${Math.round(total).toLocaleString()}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", gap: "4px" }}>
+                          <div style={{ width: "100%", height: "92px", borderRadius: "6px", background: "rgba(255,255,255,0.04)", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
+                            {topModels.map((m) => {
+                              const v = bucket.tokens[m.model] ?? 0;
+                              if (v <= 0) return null;
+                              return <div key={m.model} style={{ height: `${(v / maxTokenStack) * 100}%`, background: colorByModel.get(m.model) }} />;
+                            })}
+                          </div>
+                          <span style={{ fontSize: "10px", color: "#475569" }}>{bucket.label.slice(3)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" }}>
+                    {topModels.map((m) => (
+                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "10.5px", color: "#94a3b8" }}>
+                        <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
+                        <span>{m.model}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </Card>
+
+            <Card style={{ marginBottom: 0 }}>
+              <SectionTitle>模型 Token 占比</SectionTitle>
+              {topModels.length === 0 || tokenShareTotal === 0 ? (
+                <div style={{ fontSize: "12px", color: "#475569" }}>暂无占比数据</div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", justifyContent: "center", marginTop: "8px", marginBottom: "10px" }}>
+                    <div style={{ width: "150px", height: "150px", borderRadius: "50%", background: `conic-gradient(${tokenShareGradient})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <div style={{ width: "82px", height: "82px", borderRadius: "50%", background: "hsl(222,47%,11%)", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
+                        <span style={{ fontSize: "10px", color: "#64748b" }}>总Token</span>
+                        <span style={{ fontSize: "12px", color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{fmt(tokenShareTotal)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                    {topModels.map((m) => (
+                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "10.5px" }}>
+                        <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
+                        <span style={{ color: "#94a3b8", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.model}>{m.model}</span>
+                        <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{((m.total / tokenShareTotal) * 100).toFixed(1)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </Card>
+          </div>
         </>
       )}
 
@@ -2007,6 +2246,7 @@ export default function App() {
   });
   const [stats, setStats] = useState<Record<string, BackendStat> | null>(null);
   const [modelStats, setModelStats] = useState<Record<string, ModelStat> | null>(null);
+  const [requestLogs, setRequestLogs] = useState<RequestLog[]>([]);
   const [statsError, setStatsError] = useState<false | "auth" | "server">(false);
   const [routing, setRouting] = useState<{ localEnabled: boolean; localFallback: boolean; fakeStream: boolean }>({ localEnabled: true, localFallback: true, fakeStream: true });
   const [addUrl, setAddUrl] = useState("");
@@ -2051,7 +2291,7 @@ export default function App() {
   };
 
   const fetchStats = useCallback(async (key: string) => {
-    if (!key) { setStats(null); setModelStats(null); setStatsError(false); return; }
+    if (!key) { setStats(null); setModelStats(null); setRequestLogs([]); setStatsError(false); return; }
     try {
       const r = await fetch(`${baseUrl}/api/v1/stats`, { headers: { Authorization: `Bearer ${key}` } });
       if (!r.ok) {
@@ -2066,6 +2306,12 @@ export default function App() {
       setStats(parsed); setStatsError(false);
       setModelStats(d.modelStats && typeof d.modelStats === "object" ? d.modelStats as Record<string, ModelStat> : null);
       if (d.routing) setRouting(d.routing);
+
+      const logsRes = await fetch(`${baseUrl}/api/v1/admin/logs`, { headers: { Authorization: `Bearer ${key}` } });
+      if (logsRes.ok) {
+        const logsData = await logsRes.json();
+        setRequestLogs(Array.isArray(logsData.logs) ? logsData.logs as RequestLog[] : []);
+      }
     } catch { setStatsError("auth"); }
   }, [baseUrl]);
 
@@ -2348,6 +2594,7 @@ export default function App() {
             routing={routing}
             onToggleRouting={toggleRouting}
             modelStats={modelStats}
+            requestLogs={requestLogs}
           />
         )}
         {tab === "models" && (
