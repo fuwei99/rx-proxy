@@ -414,6 +414,10 @@ interface BackendStat {
   errors: number;
   promptTokens: number;
   completionTokens: number;
+  totalCostUsd: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
   totalDurationMs: number;
   totalTtftMs: number;
   streamingCalls: number;
@@ -423,15 +427,29 @@ interface ModelStat {
   calls: number;
   promptTokens: number;
   completionTokens: number;
+  totalCostUsd: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+interface ExtendedUsageMetrics {
+  totalTokens?: number;
+  costUsd?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
 }
 
 const EMPTY_STAT = (): BackendStat => ({
   calls: 0, errors: 0, promptTokens: 0, completionTokens: 0,
+  totalCostUsd: 0, cachedTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
   totalDurationMs: 0, totalTtftMs: 0, streamingCalls: 0,
 });
 
 const EMPTY_MODEL_STAT = (): ModelStat => ({
   calls: 0, promptTokens: 0, completionTokens: 0,
+  totalCostUsd: 0, cachedTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
 });
 
 const statsMap = new Map<string, BackendStat>();
@@ -480,6 +498,10 @@ export const statsReady: Promise<void> = (async () => {
             errors:           Number((raw as BackendStat).errors)           || 0,
             promptTokens:     Number((raw as BackendStat).promptTokens)     || 0,
             completionTokens: Number((raw as BackendStat).completionTokens) || 0,
+            totalCostUsd:     Number((raw as BackendStat).totalCostUsd)     || 0,
+            cachedTokens:     Number((raw as BackendStat).cachedTokens)     || 0,
+            cacheWriteTokens: Number((raw as BackendStat).cacheWriteTokens) || 0,
+            reasoningTokens:  Number((raw as BackendStat).reasoningTokens)  || 0,
             totalDurationMs:  Number((raw as BackendStat).totalDurationMs)  || 0,
             totalTtftMs:      Number((raw as BackendStat).totalTtftMs)      || 0,
             streamingCalls:   Number((raw as BackendStat).streamingCalls)   || 0,
@@ -494,6 +516,10 @@ export const statsReady: Promise<void> = (async () => {
               calls:            Number(raw.calls)            || 0,
               promptTokens:     Number(raw.promptTokens)     || 0,
               completionTokens: Number(raw.completionTokens) || 0,
+              totalCostUsd:     Number(raw.totalCostUsd)     || 0,
+              cachedTokens:     Number(raw.cachedTokens)     || 0,
+              cacheWriteTokens: Number(raw.cacheWriteTokens) || 0,
+              reasoningTokens:  Number(raw.reasoningTokens)  || 0,
             });
           }
         }
@@ -513,11 +539,15 @@ function getStat(label: string): BackendStat {
   return statsMap.get(label)!;
 }
 
-function recordCallStat(label: string, durationMs: number, prompt: number, completion: number, ttftMs?: number, model?: string): void {
+function recordCallStat(label: string, durationMs: number, prompt: number, completion: number, ttftMs?: number, model?: string, usage?: ExtendedUsageMetrics): void {
   const s = getStat(label);
   s.calls++;
   s.promptTokens += prompt;
   s.completionTokens += completion;
+  s.totalCostUsd += usage?.costUsd ?? 0;
+  s.cachedTokens += usage?.cachedTokens ?? 0;
+  s.cacheWriteTokens += usage?.cacheWriteTokens ?? 0;
+  s.reasoningTokens += usage?.reasoningTokens ?? 0;
   s.totalDurationMs += durationMs;
   if (ttftMs !== undefined) { s.totalTtftMs += ttftMs; s.streamingCalls++; }
   if (model) {
@@ -525,6 +555,10 @@ function recordCallStat(label: string, durationMs: number, prompt: number, compl
     ms.calls++;
     ms.promptTokens += prompt;
     ms.completionTokens += completion;
+    ms.totalCostUsd += usage?.costUsd ?? 0;
+    ms.cachedTokens += usage?.cachedTokens ?? 0;
+    ms.cacheWriteTokens += usage?.cacheWriteTokens ?? 0;
+    ms.reasoningTokens += usage?.reasoningTokens ?? 0;
   }
   scheduleSave();
 }
@@ -552,6 +586,33 @@ function setSseHeaders(res: Response) {
 function writeAndFlush(res: Response, data: string) {
   res.write(data);
   (res as unknown as { flush?: () => void }).flush?.();
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function extractExtendedUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const usageRecord = usage as Record<string, unknown>;
+  const promptDetails = usageRecord.prompt_tokens_details as Record<string, unknown> | undefined;
+  const completionDetails = usageRecord.completion_tokens_details as Record<string, unknown> | undefined;
+
+  const metrics: ExtendedUsageMetrics = {
+    totalTokens: readFiniteNumber(usageRecord.total_tokens),
+    costUsd: readFiniteNumber(usageRecord.cost),
+    cachedTokens: readFiniteNumber(promptDetails?.cached_tokens),
+    cacheWriteTokens: readFiniteNumber(promptDetails?.cache_write_tokens),
+    reasoningTokens: readFiniteNumber(completionDetails?.reasoning_tokens),
+  };
+
+  if (Object.values(metrics).every((v) => v === undefined)) return undefined;
+  return metrics;
 }
 
 const MAX_DEBUG_LOG_CHARS = 20_000;
@@ -865,7 +926,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     req.log.info({ payload: JSON.stringify(req.body) }, "Proxy request full payload");
 
     try {
-      let result: { promptTokens: number; completionTokens: number; ttftMs?: number };
+      let result: { promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics };
       if (backend.kind === "friend") {
         triedFriendUrls.add(backend.url);
         result = await handleFriendProxy({ req, res, backend, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -935,11 +996,17 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       // ✅ Success — record stats, mark friend healthy, and exit retry loop
       if (backend.kind === "friend") setHealth(backend.url, true);
       const duration = Date.now() - startTime;
-      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel);
+      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, result.usage);
       pushRequestLog({
         method: req.method, path: req.path, model: selectedModel,
         backend: backendLabel, status: 200, duration, stream: shouldStream,
         promptTokens: result.promptTokens, completionTokens: result.completionTokens,
+        totalTokens: result.usage?.totalTokens ?? (result.promptTokens + result.completionTokens),
+        costUsd: result.usage?.costUsd,
+        cachedTokens: result.usage?.cachedTokens,
+        cacheWriteTokens: result.usage?.cacheWriteTokens,
+        reasoningTokens: result.usage?.reasoningTokens,
+        provider,
         level: "info",
       });
       break;
@@ -971,7 +1038,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       pushRequestLog({
         method: req.method, path: req.path, model: selectedModel,
         backend: backendLabel, status: errStatus, duration: Date.now() - startTime,
-        stream: shouldStream, level: errStatus >= 500 ? "error" : "warn",
+        stream: shouldStream, provider, level: errStatus >= 500 ? "error" : "warn",
         error: errMsg || "Unknown error",
       });
       if (!res.headersSent) {
@@ -1602,17 +1669,23 @@ interface RequestLog {
   method: string;
   path: string;
   model?: string;
+  provider?: ModelProvider;
   backend?: string;
   status: number;
   duration: number;
   stream: boolean;
   promptTokens?: number;
   completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
   level: "info" | "warn" | "error";
   error?: string;
 }
 
-const REQUEST_LOG_MAX = 200;
+const REQUEST_LOG_MAX = 5_000;
 const requestLogs: RequestLog[] = [];
 let logIdCounter = 0;
 const logSSEClients: Set<Response> = new Set();
@@ -1660,6 +1733,10 @@ router.get("/v1/stats", requireApiKey, (_req: Request, res: Response) => {
       promptTokens: s.promptTokens,
       completionTokens: s.completionTokens,
       totalTokens: s.promptTokens + s.completionTokens,
+      totalCostUsd: s.totalCostUsd,
+      cachedTokens: s.cachedTokens,
+      cacheWriteTokens: s.cacheWriteTokens,
+      reasoningTokens: s.reasoningTokens,
       avgDurationMs: s.calls > 0 ? Math.round(s.totalDurationMs / s.calls) : 0,
       avgTtftMs: s.streamingCalls > 0 ? Math.round(s.totalTtftMs / s.streamingCalls) : null,
       health: label === "local" ? "healthy" : getCachedHealth(cfg?.url ?? "") === false ? "down" : "healthy",
@@ -2017,7 +2094,7 @@ async function handleOpenAI({
   thinkingVisible?: boolean;
   imageModalities?: readonly string[];
   providerRouting?: Record<string, unknown>;
-}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   const params: Parameters<typeof client.chat.completions.create>[0] = {
     model,
     messages: messages as Parameters<typeof client.chat.completions.create>[0]["messages"],
@@ -2038,9 +2115,11 @@ async function handleOpenAI({
     normalizeImageResponse(resultRecord);
     logResponseDebug(req, "OpenAI non-stream response (image stream fallback)", result);
     res.json(result);
+    const usage = extractExtendedUsageMetrics(result.usage);
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
       completionTokens: result.usage?.completion_tokens ?? 0,
+      usage,
     };
   }
 
@@ -2050,6 +2129,7 @@ async function handleOpenAI({
       let ttftMs: number | undefined;
       let promptTokens = 0;
       let completionTokens = 0;
+      let usage: ExtendedUsageMetrics | undefined;
       const streamResult = await client.chat.completions.create({
         ...params,
         stream: true,
@@ -2063,6 +2143,7 @@ async function handleOpenAI({
         if (chunk.usage) {
           promptTokens = chunk.usage.prompt_tokens ?? 0;
           completionTokens = chunk.usage.completion_tokens ?? 0;
+          usage = extractExtendedUsageMetrics(chunk.usage);
         }
         // OpenRouter returns reasoning content in delta.reasoning — remap to reasoning_content
         const orReasoning = delta?.reasoning as string | undefined;
@@ -2077,13 +2158,14 @@ async function handleOpenAI({
       }
       writeAndFlush(res, "data: [DONE]\n\n");
       res.end();
-      return { promptTokens, completionTokens, ttftMs };
+      return { promptTokens, completionTokens, ttftMs, usage };
     } catch (streamErr) {
       if (res.headersSent || !routingSettings.fakeStream) throw streamErr;
       req.log.warn({ err: streamErr }, "Real streaming failed, falling back to fake-stream");
       const result = await client.chat.completions.create({ ...params, stream: false });
       logResponseDebug(req, "OpenAI non-stream response (fake-stream fallback)", result);
-      return fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
+      const fakeStats = await fakeStreamResponse(res, result as unknown as Record<string, unknown>, startTime);
+      return { ...fakeStats, usage: extractExtendedUsageMetrics(result.usage) };
     }
   } else {
     const result = await client.chat.completions.create({ ...params, stream: false });
@@ -2103,9 +2185,11 @@ async function handleOpenAI({
     if (imageModalities) normalizeImageResponse(resultRecord);
     logResponseDebug(req, "OpenAI non-stream response", result);
     res.json(result);
+    const usage = extractExtendedUsageMetrics(result.usage);
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
       completionTokens: result.usage?.completion_tokens ?? 0,
+      usage,
     };
   }
 }

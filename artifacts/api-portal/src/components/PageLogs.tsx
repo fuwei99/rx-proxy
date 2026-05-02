@@ -6,12 +6,18 @@ interface LogEntry {
   method: string;
   path: string;
   model?: string;
+  provider?: "openai" | "anthropic" | "gemini" | "openrouter";
   backend?: string;
   status: number;
   duration: number;
   stream: boolean;
   promptTokens?: number;
   completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
   level: "info" | "warn" | "error";
   error?: string;
 }
@@ -29,6 +35,7 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
   const [connected, setConnected] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "info" | "warn" | "error">("all");
+  const [providerFilter, setProviderFilter] = useState<"all" | "openrouter" | "openai" | "anthropic" | "gemini">("all");
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -144,7 +151,46 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
     }
   }, [logs, autoScroll]);
 
-  const filtered = filter === "all" ? logs : logs.filter((l) => l.level === filter);
+  const filtered = logs.filter((l) => {
+    if (filter !== "all" && l.level !== filter) return false;
+    if (providerFilter !== "all" && l.provider !== providerFilter) return false;
+    return true;
+  });
+
+  const openRouterLogs = filtered.filter((l) => l.provider === "openrouter");
+  const openRouterTotals = openRouterLogs.reduce((acc, l) => {
+    acc.calls += 1;
+    acc.promptTokens += l.promptTokens ?? 0;
+    acc.completionTokens += l.completionTokens ?? 0;
+    acc.totalTokens += l.totalTokens ?? ((l.promptTokens ?? 0) + (l.completionTokens ?? 0));
+    acc.cachedTokens += l.cachedTokens ?? 0;
+    acc.cacheWriteTokens += l.cacheWriteTokens ?? 0;
+    acc.reasoningTokens += l.reasoningTokens ?? 0;
+    acc.costUsd += l.costUsd ?? 0;
+    return acc;
+  }, {
+    calls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cachedTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: 0,
+  });
+
+  const modelCostList = Object.entries(openRouterLogs.reduce<Record<string, { calls: number; costUsd: number }>>((acc, l) => {
+    const model = l.model ?? "unknown";
+    if (!acc[model]) acc[model] = { calls: 0, costUsd: 0 };
+    acc[model].calls += 1;
+    acc[model].costUsd += l.costUsd ?? 0;
+    return acc;
+  }, {}))
+    .map(([model, data]) => ({ model, calls: data.calls, costUsd: data.costUsd }))
+    .sort((a, b) => b.costUsd - a.costUsd)
+    .slice(0, 12);
+
+  const maxModelCost = modelCostList[0]?.costUsd ?? 0;
 
   const downloadLogs = () => {
     const text = filtered.map((l) =>
@@ -207,6 +253,21 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
               {lv === "all" ? "全部" : lv.toUpperCase()}
             </button>
           ))}
+          <select
+            value={providerFilter}
+            onChange={(e) => setProviderFilter(e.target.value as "all" | "openrouter" | "openai" | "anthropic" | "gemini")}
+            style={{
+              fontSize: "11px", padding: "4px 8px", borderRadius: "6px",
+              background: "rgba(255,255,255,0.05)", color: "#94a3b8",
+              border: "1px solid rgba(255,255,255,0.1)", cursor: "pointer", marginLeft: "6px",
+            }}
+          >
+            <option value="all">全部 Provider</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+          </select>
           <label style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "11px", color: "#64748b", marginLeft: "8px", cursor: "pointer" }}>
             <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
             自动滚动
@@ -222,6 +283,60 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
             border: "1px solid rgba(239,68,68,0.2)", cursor: "pointer",
           }}>清空</button>
         </div>
+      </div>
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+        gap: "10px",
+      }}>
+        {[
+          { label: "OpenRouter 调用", value: openRouterTotals.calls.toString(), color: "#818cf8" },
+          { label: "输入 / 输出", value: `${openRouterTotals.promptTokens} / ${openRouterTotals.completionTokens}`, color: "#34d399" },
+          { label: "缓存命中", value: `${openRouterTotals.cachedTokens}`, color: "#22c55e" },
+          { label: "缓存写入", value: `${openRouterTotals.cacheWriteTokens}`, color: "#06b6d4" },
+          { label: "总花费(USD)", value: `$${openRouterTotals.costUsd.toFixed(6)}`, color: "#f59e0b" },
+        ].map((item) => (
+          <div key={item.label} style={{
+            background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: "10px", padding: "10px 12px",
+          }}>
+            <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "4px" }}>{item.label}</div>
+            <div style={{ color: item.color, fontSize: "14px", fontWeight: 700, fontFamily: "'JetBrains Mono', Menlo, monospace" }}>{item.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        background: "rgba(0,0,0,0.35)", borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)",
+        padding: "10px 12px",
+      }}>
+        <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "8px", fontWeight: 600 }}>OpenRouter 按模型花费（当前筛选）</div>
+        {modelCostList.length === 0 ? (
+          <div style={{ fontSize: "12px", color: "#475569" }}>暂无 OpenRouter 成本数据</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {modelCostList.map((item) => {
+              const ratio = maxModelCost > 0 ? item.costUsd / maxModelCost : 0;
+              return (
+                <div key={item.model} title={`${item.model} | ${item.calls} calls | $${item.costUsd.toFixed(6)}`}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "2px", gap: "8px" }}>
+                    <span style={{ color: "#94a3b8", fontFamily: "'JetBrains Mono', Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.model}</span>
+                    <span style={{ color: "#f59e0b", flexShrink: 0 }}>${item.costUsd.toFixed(6)}</span>
+                  </div>
+                  <div style={{ height: "6px", background: "rgba(255,255,255,0.08)", borderRadius: "999px" }}>
+                    <div style={{
+                      width: `${Math.max(6, ratio * 100)}%`,
+                      height: "100%",
+                      borderRadius: "999px",
+                      background: "linear-gradient(90deg, #f59e0b, #fb7185)",
+                    }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div
@@ -253,7 +368,15 @@ export default function PageLogs({ baseUrl, apiKey }: { baseUrl: string; apiKey:
             <span style={{ color: "#cbd5e1", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {l.path}
             </span>
+            {l.provider && <span style={{ color: "#a78bfa", flexShrink: 0 }}>{l.provider}</span>}
             {l.model && <span style={{ color: "#818cf8", flexShrink: 0 }}>{l.model}</span>}
+            {(l.promptTokens !== undefined || l.completionTokens !== undefined) && (
+              <span style={{ color: "#34d399", flexShrink: 0 }}>
+                in:{l.promptTokens ?? 0} out:{l.completionTokens ?? 0}
+              </span>
+            )}
+            {(l.cachedTokens ?? 0) > 0 && <span style={{ color: "#22c55e", flexShrink: 0 }}>cache:{l.cachedTokens}</span>}
+            {(l.costUsd ?? 0) > 0 && <span style={{ color: "#f59e0b", flexShrink: 0 }}>${l.costUsd!.toFixed(6)}</span>}
             <span style={{ color: STATUS_COLOR(l.status), flexShrink: 0 }}>{l.status}</span>
             <span style={{ color: "#64748b", flexShrink: 0 }}>{l.duration}ms</span>
             {l.stream && <span style={{ color: "#6366f1", fontSize: "10px", flexShrink: 0 }}>SSE</span>}

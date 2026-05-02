@@ -567,8 +567,33 @@ function PageHome({
   );
 }
 
-type BackendStat = { calls: number; errors: number; streamingCalls: number; promptTokens: number; completionTokens: number; totalTokens: number; avgDurationMs: number; avgTtftMs: number | null; health: string; url?: string; dynamic?: boolean; enabled?: boolean };
-type ModelStat = { calls: number; promptTokens: number; completionTokens: number };
+type BackendStat = {
+  calls: number;
+  errors: number;
+  streamingCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  totalCostUsd?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  avgDurationMs: number;
+  avgTtftMs: number | null;
+  health: string;
+  url?: string;
+  dynamic?: boolean;
+  enabled?: boolean;
+};
+type ModelStat = {
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalCostUsd?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+};
 
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "gpt-5.2": { input: 2.5, output: 10 },
@@ -717,9 +742,19 @@ function PageStats({
 
   const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : n.toString();
 
-  const totalModelCost = modelStats
+  const totalModelCostActual = modelStats
+    ? Object.values(modelStats).reduce((sum, ms) => sum + (ms.totalCostUsd ?? 0), 0)
+    : null;
+
+  const totalModelCostEstimated = modelStats
     ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + estimateModelCost(model, ms.promptTokens, ms.completionTokens), 0)
     : null;
+
+  const hasActualModelCost = modelStats
+    ? Object.values(modelStats).some((ms) => (ms.totalCostUsd ?? 0) > 0)
+    : false;
+
+  const totalModelCost = hasActualModelCost ? totalModelCostActual : totalModelCostEstimated;
 
   const totalModelInputCost = modelStats
     ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + (ms.promptTokens * getModelPrice(model).input) / 1_000_000, 0)
@@ -740,10 +775,28 @@ function PageStats({
     promptTokens: acc.promptTokens + s.promptTokens,
     completionTokens: acc.completionTokens + s.completionTokens,
     totalTokens: acc.totalTokens + s.totalTokens,
+    totalCostUsd: acc.totalCostUsd + (s.totalCostUsd ?? 0),
+    cachedTokens: acc.cachedTokens + (s.cachedTokens ?? 0),
+    cacheWriteTokens: acc.cacheWriteTokens + (s.cacheWriteTokens ?? 0),
+    reasoningTokens: acc.reasoningTokens + (s.reasoningTokens ?? 0),
     totalDuration: acc.totalDuration + (s.avgDurationMs * s.calls),
     totalTtft: acc.totalTtft + ((s.avgTtftMs ?? 0) * (s.streamingCalls ?? 0)),
     totalStreamCalls: acc.totalStreamCalls + (s.streamingCalls ?? 0),
-  }), { calls: 0, errors: 0, streamingCalls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, totalDuration: 0, totalTtft: 0, totalStreamCalls: 0 }) : null;
+  }), {
+    calls: 0,
+    errors: 0,
+    streamingCalls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    totalCostUsd: 0,
+    cachedTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalDuration: 0,
+    totalTtft: 0,
+    totalStreamCalls: 0,
+  }) : null;
 
   const statCardStyle: React.CSSProperties = {
     background: "rgba(0,0,0,0.3)",
@@ -853,13 +906,15 @@ function PageStats({
             <div style={statCardStyle}>
               <div style={statLabelStyle}>
                 <span style={{ fontSize: "15px" }}>&#128176;</span>
-                <span style={{ color: "#f59e0b" }}>预估开销</span>
-                {totalModelCost !== null && <span style={{ fontSize: "10px", color: "#475569", marginLeft: "auto" }}>按模型定价</span>}
+                <span style={{ color: "#f59e0b" }}>开销</span>
+                <span style={{ fontSize: "10px", color: "#475569", marginLeft: "auto" }}>
+                  {hasActualModelCost ? "上游实测" : "按模型估算"}
+                </span>
               </div>
               <div>
                 <div style={subNumStyle}>总开销</div>
                 <div style={{ ...bigNumStyle, color: "#f59e0b" }}>
-                  ${(totalModelCost ?? estimateCostFallback(totals!.promptTokens, totals!.completionTokens)).toFixed(2)}
+                  ${((hasActualModelCost ? totals!.totalCostUsd : (totalModelCost ?? estimateCostFallback(totals!.promptTokens, totals!.completionTokens))) ?? 0).toFixed(2)}
                 </div>
                 <div style={{ display: "flex", gap: "12px", marginTop: "4px" }}>
                   <span style={{ fontSize: "11px", color: "#475569" }}>输入 <span style={{ color: "#f59e0b" }}>${(totalModelInputCost ?? (totals!.promptTokens * DEFAULT_PRICING.input / 1_000_000)).toFixed(2)}</span></span>
@@ -935,7 +990,11 @@ function PageStats({
                 }
                 const sorted = Object.entries(modelStats)
                   .filter(([, ms]) => ms.calls > 0)
-                  .map(([model, ms]) => ({ model, cost: estimateModelCost(model, ms.promptTokens, ms.completionTokens), calls: ms.calls }))
+                  .map(([model, ms]) => ({
+                    model,
+                    cost: (ms.totalCostUsd ?? 0) > 0 ? (ms.totalCostUsd ?? 0) : estimateModelCost(model, ms.promptTokens, ms.completionTokens),
+                    calls: ms.calls,
+                  }))
                   .sort((a, b) => b.cost - a.cost);
                 if (sorted.length === 0) return <div style={{ fontSize: "12px", color: "#475569" }}>暂无数据</div>;
                 return (
@@ -967,7 +1026,7 @@ function PageStats({
                 {Object.entries(stats).map(([label, s]) => {
                   const isEnabled = s.enabled !== false;
                   const isHealthy = s.health === "healthy";
-                  const cost = estimateCostFallback(s.promptTokens, s.completionTokens);
+                  const cost = (s.totalCostUsd ?? 0) > 0 ? (s.totalCostUsd ?? 0) : estimateCostFallback(s.promptTokens, s.completionTokens);
                   return (
                     <div key={label} style={{
                       background: isEnabled ? "rgba(0,0,0,0.2)" : "rgba(0,0,0,0.35)",
@@ -993,6 +1052,7 @@ function PageStats({
                           { label: "错误", value: s.errors.toString(), color: s.errors > 0 ? "#f87171" : "#4ade80" },
                           { label: "输入 Token", value: fmt(s.promptTokens), color: "#34d399" },
                           { label: "输出 Token", value: fmt(s.completionTokens), color: "#34d399" },
+                          { label: "缓存命中", value: fmt(s.cachedTokens ?? 0), color: "#22c55e" },
                           { label: "均耗时", value: s.calls > 0 ? `${s.avgDurationMs}ms` : "--", color: "#e2e8f0" },
                           { label: "首 Token", value: s.avgTtftMs ? `${s.avgTtftMs}ms` : "--", color: "#e2e8f0" },
                           { label: "开销", value: `$${cost.toFixed(2)}`, color: "#f59e0b" },
