@@ -615,6 +615,49 @@ function extractExtendedUsageMetrics(usage: unknown): ExtendedUsageMetrics | und
   return metrics;
 }
 
+type ClaudeCostRates = { inputPerMTok: number; outputPerMTok: number; cacheWritePerMTok: number; cacheReadPerMTok: number };
+const CLAUDE_OPUS_45_47_RATES: ClaudeCostRates = {
+  inputPerMTok: 5,
+  outputPerMTok: 25,
+  cacheWritePerMTok: 6.25,
+  cacheReadPerMTok: 0.5,
+};
+
+function getClaudeFallbackCostRates(model?: string): ClaudeCostRates | undefined {
+  if (!model) return undefined;
+  const normalized = model.toLowerCase().replace(/^anthropic\//, "").replace(/\./g, "-");
+  if (/^claude-opus-4-(5|6|7)(-|$)/.test(normalized)) {
+    return CLAUDE_OPUS_45_47_RATES;
+  }
+  return undefined;
+}
+
+function withEstimatedCostIfMissing(
+  model: string | undefined,
+  promptTokens: number,
+  completionTokens: number,
+  usage?: ExtendedUsageMetrics,
+): ExtendedUsageMetrics | undefined {
+  if (usage?.costUsd !== undefined) return usage;
+  const rates = getClaudeFallbackCostRates(model);
+  if (!rates) return usage;
+
+  const cachedTokens = usage?.cachedTokens ?? 0;
+  const cacheWriteTokens = usage?.cacheWriteTokens ?? 0;
+  const estimatedCostUsd = (
+    promptTokens * rates.inputPerMTok
+    + completionTokens * rates.outputPerMTok
+    + cacheWriteTokens * rates.cacheWritePerMTok
+    + cachedTokens * rates.cacheReadPerMTok
+  ) / 1_000_000;
+
+  return {
+    ...(usage ?? {}),
+    totalTokens: usage?.totalTokens ?? (promptTokens + completionTokens),
+    costUsd: estimatedCostUsd,
+  };
+}
+
 function extractAnthropicUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const usageRecord = usage as Record<string, unknown>;
@@ -1045,16 +1088,17 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
       // ✅ Success — record stats, mark friend healthy, and exit retry loop
       if (backend.kind === "friend") setHealth(backend.url, true);
       const duration = Date.now() - startTime;
-      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, result.usage);
+      const finalUsage = withEstimatedCostIfMissing(selectedModel, result.promptTokens, result.completionTokens, result.usage);
+      recordCallStat(backendLabel, duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, finalUsage);
       pushRequestLog({
         method: req.method, path: req.path, model: selectedModel,
         backend: backendLabel, status: 200, duration, stream: shouldStream,
         promptTokens: result.promptTokens, completionTokens: result.completionTokens,
-        totalTokens: result.usage?.totalTokens ?? (result.promptTokens + result.completionTokens),
-        costUsd: result.usage?.costUsd,
-        cachedTokens: result.usage?.cachedTokens,
-        cacheWriteTokens: result.usage?.cacheWriteTokens,
-        reasoningTokens: result.usage?.reasoningTokens,
+        totalTokens: finalUsage?.totalTokens ?? (result.promptTokens + result.completionTokens),
+        costUsd: finalUsage?.costUsd,
+        cachedTokens: finalUsage?.cachedTokens,
+        cacheWriteTokens: finalUsage?.cacheWriteTokens,
+        reasoningTokens: finalUsage?.reasoningTokens,
         provider,
         level: "info",
       });
@@ -1682,9 +1726,10 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         }
         res.end();
         const dur = Date.now() - startTime;
-        const finalUsageMetrics = usageMetrics
+        const baseUsageMetrics = usageMetrics
           ? { ...usageMetrics, totalTokens: usageMetrics.totalTokens ?? (inputTokens + outputTokens) }
           : undefined;
+        const finalUsageMetrics = withEstimatedCostIfMissing(selectedModel, inputTokens, outputTokens, baseUsageMetrics);
         recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel, finalUsageMetrics);
         pushRequestLog({
           method: req.method, path: req.path, model: selectedModel,
@@ -1723,17 +1768,20 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       const usageMetrics = extractAnthropicUsageMetrics(usage);
       const usageRecord = (usage ?? {}) as { input_tokens?: number; output_tokens?: number };
       const dur = Date.now() - startTime;
-      recordCallStat("local", dur, usageRecord.input_tokens ?? 0, usageRecord.output_tokens ?? 0, undefined, selectedModel, usageMetrics);
+      const inputTokens = usageRecord.input_tokens ?? 0;
+      const outputTokens = usageRecord.output_tokens ?? 0;
+      const finalUsageMetrics = withEstimatedCostIfMissing(selectedModel, inputTokens, outputTokens, usageMetrics);
+      recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel, finalUsageMetrics);
       pushRequestLog({
         method: req.method, path: req.path, model: selectedModel,
         backend: "local", status: 200, duration: dur, stream: false,
-        promptTokens: usageRecord.input_tokens ?? 0,
-        completionTokens: usageRecord.output_tokens ?? 0,
-        totalTokens: usageMetrics?.totalTokens ?? ((usageRecord.input_tokens ?? 0) + (usageRecord.output_tokens ?? 0)),
-        costUsd: usageMetrics?.costUsd,
-        cachedTokens: usageMetrics?.cachedTokens,
-        cacheWriteTokens: usageMetrics?.cacheWriteTokens,
-        reasoningTokens: usageMetrics?.reasoningTokens,
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: finalUsageMetrics?.totalTokens ?? (inputTokens + outputTokens),
+        costUsd: finalUsageMetrics?.costUsd,
+        cachedTokens: finalUsageMetrics?.cachedTokens,
+        cacheWriteTokens: finalUsageMetrics?.cacheWriteTokens,
+        reasoningTokens: finalUsageMetrics?.reasoningTokens,
         level: "info",
       });
       res.json(resultWithMarkers);
