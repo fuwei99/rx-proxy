@@ -642,6 +642,8 @@ function PageStats({
   const [envPromptCopied, setEnvPromptCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [selectedNode, setSelectedNode] = useState("local");
+  const [nodeLogPage, setNodeLogPage] = useState(1);
+  const [analysisTab, setAnalysisTab] = useState<"cost-dist" | "cost-trend" | "calls-share" | "calls-rank">("calls-rank");
 
   const ENV_NODE_PROMPT =
     `请在当前 Replit 项目中添加一个环境变量，将子节点注册为永久 ENV 节点（Publish 后不会丢失）：\n\n` +
@@ -751,7 +753,7 @@ function PageStats({
     .slice(-80)
     .reverse();
 
-  const modelPalette = ["#818cf8", "#34d399", "#f59e0b", "#f472b6", "#22d3ee", "#a78bfa", "#fb7185", "#4ade80"];
+  const modelPalette = ["#b095fc", "#eedbfe", "#009688", "#9ca3af", "#f9a8d4", "#60a5fa", "#fde047", "#8b5cf6", "#fb923c", "#34d399"];
   const allModelRows = modelStats
     ? Object.entries(modelStats)
       .filter(([, ms]) => ms.calls > 0)
@@ -766,35 +768,77 @@ function PageStats({
       .sort((a, b) => b.total - a.total)
     : [];
 
-  const topModels = allModelRows.slice(0, 6);
-  const colorByModel = new Map(topModels.map((m, idx) => [m.model, modelPalette[idx % modelPalette.length]]));
-
   const successfulLogs = requestLogs.filter((l) => (l.status < 500) && !!l.model);
-  const bucketMs = 5 * 60 * 1000;
-  const bucketMap = new Map<number, { ts: number; label: string; calls: Record<string, number>; tokens: Record<string, number> }>();
+  const modelAggMap = new Map<string, { model: string; calls: number; tokens: number; cost: number }>();
+  for (const log of successfulLogs) {
+    const model = log.model!;
+    const tokens = log.totalTokens ?? ((log.promptTokens ?? 0) + (log.completionTokens ?? 0));
+    const prev = modelAggMap.get(model) ?? { model, calls: 0, tokens: 0, cost: 0 };
+    prev.calls += 1;
+    prev.tokens += tokens;
+    prev.cost += log.costUsd ?? 0;
+    modelAggMap.set(model, prev);
+  }
+  const modelAggList = [...modelAggMap.values()];
+
+  const callsRankModels = modelAggList
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 12);
+  const callsShareModels = [...callsRankModels];
+  const costTopModels = [...modelAggList]
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 6);
+
+  const colorByModel = new Map<string, string>();
+  [...callsRankModels, ...costTopModels].forEach((m, idx) => {
+    if (!colorByModel.has(m.model)) colorByModel.set(m.model, modelPalette[idx % modelPalette.length]);
+  });
+
+  const bucketMs = 60 * 60 * 1000;
+  const bucketMap = new Map<number, { ts: number; label: string; calls: Record<string, number>; cost: Record<string, number> }>();
   for (const log of successfulLogs) {
     const t = Date.parse(log.time);
     if (!Number.isFinite(t)) continue;
     const ts = Math.floor(t / bucketMs) * bucketMs;
     const d = new Date(ts);
-    const label = `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
-    if (!bucketMap.has(ts)) bucketMap.set(ts, { ts, label, calls: {}, tokens: {} });
+    const month = (d.getMonth() + 1).toString().padStart(2, "0");
+    const day = d.getDate().toString().padStart(2, "0");
+    const hour = d.getHours().toString().padStart(2, "0");
+    const label = `${month}-${day} ${hour}:00`;
+    if (!bucketMap.has(ts)) bucketMap.set(ts, { ts, label, calls: {}, cost: {} });
     const b = bucketMap.get(ts)!;
     const model = log.model!;
-    if (!colorByModel.has(model)) continue;
     b.calls[model] = (b.calls[model] ?? 0) + 1;
-    b.tokens[model] = (b.tokens[model] ?? 0) + (log.totalTokens ?? ((log.promptTokens ?? 0) + (log.completionTokens ?? 0)));
+    b.cost[model] = (b.cost[model] ?? 0) + (log.costUsd ?? 0);
   }
   const timeBuckets = [...bucketMap.values()].sort((a, b) => a.ts - b.ts).slice(-12);
+  
+  const getCeilGrid = (maxVal: number) => {
+    if (maxVal <= 0) return 10;
+    const p = Math.pow(10, Math.floor(Math.log10(maxVal)));
+    return Math.ceil(maxVal / p) * p;
+  };
+  
+  const rawMaxCost = Math.max(0, ...timeBuckets.map((b) => Object.values(b.cost).reduce((x, y) => x + y, 0)));
+  const maxCostStack = getCeilGrid(rawMaxCost);
   const maxCallStack = Math.max(1, ...timeBuckets.map((b) => Object.values(b.calls).reduce((x, y) => x + y, 0)));
-  const maxTokenStack = Math.max(1, ...timeBuckets.map((b) => Object.values(b.tokens).reduce((x, y) => x + y, 0)));
 
-  const tokenShareTotal = topModels.reduce((sum, m) => sum + m.total, 0);
-  const tokenShareGradient = tokenShareTotal > 0
+  const trendModels = costTopModels.slice(0, 5);
+  const trendMax = getCeilGrid(Math.max(
+    0,
+    ...timeBuckets.flatMap((b) => trendModels.map((m) => b.cost[m.model] ?? 0))
+  ));
+  const trendW = 800;
+  const trendH = 260;
+  const trendPadX = 10;
+  const trendPadY = 22;
+
+  const callsShareTotal = callsShareModels.reduce((sum, m) => sum + m.calls, 0);
+  const callsShareGradient = callsShareTotal > 0
     ? (() => {
       let acc = 0;
-      return topModels.map((m) => {
-        const pct = (m.total / tokenShareTotal) * 100;
+      return callsShareModels.map((m) => {
+        const pct = (m.calls / callsShareTotal) * 100;
         const start = acc;
         acc += pct;
         const color = colorByModel.get(m.model) ?? "#818cf8";
@@ -1129,90 +1173,194 @@ function PageStats({
             )}
           </Card>
 
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "12px", marginBottom: "14px" }}>
-            <Card style={{ marginBottom: 0 }}>
-              <SectionTitle>时间堆叠柱图（模型）</SectionTitle>
-              {timeBuckets.length === 0 || topModels.length === 0 ? (
-                <div style={{ fontSize: "12px", color: "#475569" }}>日志不足，暂无可视化数据</div>
-              ) : (
+          <Card style={{ marginBottom: "14px", padding: "0" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "15px", fontWeight: 700, color: "#e2e8f0" }}>
+                <span style={{ fontSize: "16px" }}>&#128337;</span>
+                <span>模型调用次数排行</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "13px" }}>
+                {[
+                  { key: "cost-dist" as const, label: "消耗分布" },
+                  { key: "cost-trend" as const, label: "消耗趋势" },
+                  { key: "calls-share" as const, label: "调用次数分布" },
+                  { key: "calls-rank" as const, label: "调用次数排行" },
+                ].map((tab, idx, arr) => (
+                  <div key={tab.key} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <button
+                      onClick={() => setAnalysisTab(tab.key)}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: 0,
+                        color: analysisTab === tab.key ? "#e2e8f0" : "#64748b",
+                        fontWeight: analysisTab === tab.key ? 700 : 500,
+                        fontSize: "13px",
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                    {idx < arr.length - 1 && <span style={{ color: "#334155" }}>/</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ padding: "18px" }}>
+              {analysisTab === "cost-dist" && (
                 <>
-                  <div style={{ marginBottom: "8px", fontSize: "11px", color: "#94a3b8" }}>调用次数（5分钟桶）</div>
-                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(18px, 1fr))`, gap: "8px", alignItems: "end", height: "110px", marginBottom: "14px" }}>
-                    {timeBuckets.map((bucket) => {
-                      const total = Object.values(bucket.calls).reduce((a, b) => a + b, 0);
-                      return (
-                        <div key={`c-${bucket.ts}`} title={`${bucket.label} · calls ${total}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", gap: "4px" }}>
-                          <div style={{ width: "100%", height: "92px", borderRadius: "6px", background: "rgba(255,255,255,0.04)", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
-                            {topModels.map((m) => {
-                              const v = bucket.calls[m.model] ?? 0;
-                              if (v <= 0) return null;
-                              return <div key={m.model} style={{ height: `${(v / maxCallStack) * 100}%`, background: colorByModel.get(m.model) }} />;
-                            })}
-                          </div>
-                          <span style={{ fontSize: "10px", color: "#475569" }}>{bucket.label.slice(3)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div style={{ marginBottom: "8px", fontSize: "11px", color: "#94a3b8" }}>Token 消耗（5分钟桶）</div>
-                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(18px, 1fr))`, gap: "8px", alignItems: "end", height: "110px" }}>
-                    {timeBuckets.map((bucket) => {
-                      const total = Object.values(bucket.tokens).reduce((a, b) => a + b, 0);
-                      return (
-                        <div key={`t-${bucket.ts}`} title={`${bucket.label} · tokens ${Math.round(total).toLocaleString()}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", gap: "4px" }}>
-                          <div style={{ width: "100%", height: "92px", borderRadius: "6px", background: "rgba(255,255,255,0.04)", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
-                            {topModels.map((m) => {
-                              const v = bucket.tokens[m.model] ?? 0;
-                              if (v <= 0) return null;
-                              return <div key={m.model} style={{ height: `${(v / maxTokenStack) * 100}%`, background: colorByModel.get(m.model) }} />;
-                            })}
-                          </div>
-                          <span style={{ fontSize: "10px", color: "#475569" }}>{bucket.label.slice(3)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" }}>
-                    {topModels.map((m) => (
-                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "10.5px", color: "#94a3b8" }}>
-                        <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
-                        <span>{m.model}</span>
+                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128202;</div>
+                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型消耗分布</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：${modelAggList.reduce((s, m) => s + m.cost, 0).toFixed(2)}</div>
+                  {timeBuckets.length === 0 || costTopModels.length === 0 ? (
+                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无消耗分布数据</div>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(24px, 1fr))`, gap: "8px", alignItems: "end", height: "220px", marginBottom: "12px" }}>
+                        {timeBuckets.map((bucket) => {
+                          const total = Object.values(bucket.cost).reduce((a, b) => a + b, 0);
+                          return (
+                            <div key={`cost-${bucket.ts}`} title={`${bucket.label} · $${total.toFixed(4)}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}>
+                              <div style={{ width: "100%", height: "180px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
+                                {costTopModels.map((m) => {
+                                  const v = bucket.cost[m.model] ?? 0;
+                                  if (v <= 0) return null;
+                                  return <div key={m.model} style={{ height: `${(v / maxCostStack) * 100}%`, background: colorByModel.get(m.model) }} />;
+                                })}
+                              </div>
+                              <span style={{ fontSize: "10px", color: "#64748b" }}>{bucket.label}</span>
+                            </div>
+                          );
+                        })}
                       </div>
-                    ))}
-                  </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px" }}>
+                        {costTopModels.map((m) => (
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                            <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
+                            <span>{m.model}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </>
               )}
-            </Card>
 
-            <Card style={{ marginBottom: 0 }}>
-              <SectionTitle>模型 Token 占比</SectionTitle>
-              {topModels.length === 0 || tokenShareTotal === 0 ? (
-                <div style={{ fontSize: "12px", color: "#475569" }}>暂无占比数据</div>
-              ) : (
+              {analysisTab === "cost-trend" && (
                 <>
-                  <div style={{ display: "flex", justifyContent: "center", marginTop: "8px", marginBottom: "10px" }}>
-                    <div style={{ width: "150px", height: "150px", borderRadius: "50%", background: `conic-gradient(${tokenShareGradient})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <div style={{ width: "82px", height: "82px", borderRadius: "50%", background: "hsl(222,47%,11%)", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
-                        <span style={{ fontSize: "10px", color: "#64748b" }}>总Token</span>
-                        <span style={{ fontSize: "12px", color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{fmt(tokenShareTotal)}</span>
+                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128200;</div>
+                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型消耗趋势</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：${modelAggList.reduce((s, m) => s + m.cost, 0).toFixed(2)}</div>
+                  {timeBuckets.length < 2 || trendModels.length === 0 ? (
+                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无趋势数据</div>
+                  ) : (
+                    <>
+                      <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", background: "rgba(255,255,255,0.02)", padding: "8px" }}>
+                        <svg viewBox={`0 0 ${trendW} ${trendH}`} style={{ width: "100%", height: "240px" }}>
+                          {[0, 1, 2, 3, 4].map((i) => {
+                            const y = trendPadY + ((trendH - trendPadY * 2) * i) / 4;
+                            return <line key={i} x1={trendPadX} y1={y} x2={trendW - trendPadX} y2={y} stroke="rgba(148,163,184,0.18)" strokeWidth="1" />;
+                          })}
+                          {trendModels.map((m) => {
+                            const pts = timeBuckets.map((bucket, idx) => {
+                              const x = trendPadX + ((trendW - trendPadX * 2) * idx) / Math.max(1, timeBuckets.length - 1);
+                              const v = bucket.cost[m.model] ?? 0;
+                              const y = trendH - trendPadY - (v / trendMax) * (trendH - trendPadY * 2);
+                              return { x, y, v };
+                            });
+                            const d = pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                            const c = colorByModel.get(m.model) ?? "#a78bfa";
+                            return (
+                              <g key={m.model}>
+                                <path d={d} fill="none" stroke={c} strokeWidth="2.2" />
+                                {pts.map((p, idx) => <circle key={`${m.model}-${idx}`} cx={p.x} cy={p.y} r="3.5" fill={c} />)}
+                              </g>
+                            );
+                          })}
+                        </svg>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px", fontSize: "10px", color: "#64748b" }}>
+                        {timeBuckets.map((b) => <span key={`xl-${b.ts}`}>{b.label}</span>)}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", marginTop: "10px" }}>
+                        {trendModels.map((m) => (
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                            <span style={{ width: "8px", height: "8px", borderRadius: "999px", background: colorByModel.get(m.model) }} />
+                            <span>{m.model}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {analysisTab === "calls-share" && (
+                <>
+                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128309;</div>
+                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型调用次数占比</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：{callsShareTotal}</div>
+                  {callsShareModels.length === 0 || callsShareTotal === 0 ? (
+                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无调用次数占比数据</div>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: "16px", alignItems: "center" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {callsShareModels.map((m) => (
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
+                            <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: colorByModel.get(m.model) }} />
+                            <span style={{ color: "#94a3b8", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.model}>{m.model}</span>
+                            <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{((m.calls / callsShareTotal) * 100).toFixed(1)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "center" }}>
+                        <div style={{ width: "260px", height: "260px", borderRadius: "50%", background: `conic-gradient(${callsShareGradient})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <div style={{ width: "142px", height: "142px", borderRadius: "50%", background: "hsl(222,47%,11%)", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
+                            <span style={{ fontSize: "12px", color: "#64748b" }}>总调用</span>
+                            <span style={{ fontSize: "18px", color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{callsShareTotal}</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-                    {topModels.map((m) => (
-                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "10.5px" }}>
-                        <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
-                        <span style={{ color: "#94a3b8", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.model}>{m.model}</span>
-                        <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{((m.total / tokenShareTotal) * 100).toFixed(1)}%</span>
-                      </div>
-                    ))}
-                  </div>
+                  )}
                 </>
               )}
-            </Card>
-          </div>
+
+              {analysisTab === "calls-rank" && (
+                <>
+                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#127942;</div>
+                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型调用次数排行</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：{callsShareTotal}</div>
+                  {callsRankModels.length === 0 ? (
+                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无调用排行数据</div>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${callsRankModels.length}, minmax(28px, 1fr))`, gap: "8px", alignItems: "end", height: "260px", marginBottom: "12px" }}>
+                        {callsRankModels.map((m) => (
+                          <div key={m.model} title={`${m.model}: ${m.calls}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}>
+                            <div style={{ width: "100%", height: `${Math.max(4, (m.calls / maxCallStack) * 220)}px`, background: colorByModel.get(m.model), borderRadius: "6px 6px 0 0" }} />
+                            <span style={{ fontSize: "10px", color: "#64748b", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {m.model.split("/").pop() ?? m.model}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
+                        {callsRankModels.slice(0, 6).map((m) => (
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                            <span style={{ width: "10px", height: "10px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
+                            <span>{m.model}</span>
+                            <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{m.calls}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          </Card>
         </>
       )}
 

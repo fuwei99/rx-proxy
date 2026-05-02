@@ -2387,6 +2387,10 @@ async function handleOpenRouterFetch({
     messages,
     stream,
   };
+  if (model === "anthropic/claude-opus-4.6" || model === "anthropic/claude-opus-4.6-fast") {
+    payload.temperature = 1;
+    payload.top_p = 1;
+  }
   if (maxTokens) payload.max_tokens = maxTokens;
   if (tools?.length) payload.tools = tools;
   if (toolChoice !== undefined) payload.tool_choice = toolChoice;
