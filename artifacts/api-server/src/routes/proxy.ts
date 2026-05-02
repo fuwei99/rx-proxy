@@ -622,12 +622,30 @@ const CLAUDE_OPUS_45_47_RATES: ClaudeCostRates = {
   cacheWritePerMTok: 6.25,
   cacheReadPerMTok: 0.5,
 };
+const CLAUDE_SONNET_45_46_RATES: ClaudeCostRates = {
+  inputPerMTok: 3,
+  outputPerMTok: 15,
+  cacheWritePerMTok: 3.75,
+  cacheReadPerMTok: 0.3,
+};
+const CLAUDE_HAIKU_45_RATES: ClaudeCostRates = {
+  inputPerMTok: 1,
+  outputPerMTok: 5,
+  cacheWritePerMTok: 1.25,
+  cacheReadPerMTok: 0.1,
+};
 
 function getClaudeFallbackCostRates(model?: string): ClaudeCostRates | undefined {
   if (!model) return undefined;
   const normalized = model.toLowerCase().replace(/^anthropic\//, "").replace(/\./g, "-");
   if (/^claude-opus-4-(5|6|7)(-|$)/.test(normalized)) {
     return CLAUDE_OPUS_45_47_RATES;
+  }
+  if (/^claude-sonnet-4-(5|6)(-|$)/.test(normalized)) {
+    return CLAUDE_SONNET_45_46_RATES;
+  }
+  if (/^claude-haiku-4-5(-|$)/.test(normalized)) {
+    return CLAUDE_HAIKU_45_RATES;
   }
   return undefined;
 }
