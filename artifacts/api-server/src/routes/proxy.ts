@@ -811,6 +811,28 @@ type OAIMessage =
   | { role: "tool"; content: string; tool_call_id: string }
   | { role: string; content: string | OAIContentPart[] | null };
 
+function addMissingThinkingSignatures(messages: OAIMessage[]): OAIMessage[] {
+  return messages.map((msg) => {
+    if (!Array.isArray(msg.content)) return msg;
+    let changed = false;
+    const nextContent = msg.content.map((part) => {
+      if (!part || typeof part !== "object") return part;
+      const record = part as Record<string, unknown>;
+      if (
+        record.type === "thinking"
+        && typeof record.thinking === "string"
+        && (record.signature === undefined || record.signature === null || record.signature === "")
+      ) {
+        changed = true;
+        return { ...record, signature: "skip_thought_signature_validator" };
+      }
+      return part;
+    });
+    if (!changed) return msg;
+    return { ...msg, content: nextContent };
+  });
+}
+
 type AnthropicImageSource =
   | { type: "base64"; media_type: string; data: string }
   | { type: "url"; url: string };
@@ -2294,9 +2316,10 @@ async function handleOpenRouterFetch({
   }
 
   const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const normalizedMessages = addMissingThinkingSignatures(messages);
   const payload: Record<string, unknown> = {
     model,
-    messages,
+    messages: normalizedMessages,
     stream,
   };
   if (maxTokens) payload.max_tokens = maxTokens;
