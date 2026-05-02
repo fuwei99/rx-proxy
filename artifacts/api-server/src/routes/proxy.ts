@@ -2398,6 +2398,25 @@ async function handleOpenRouterFetch({
   }
 
   const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+
+  // 优化缓存策略：将断点移动到最后一条 assistant 消息
+  let finalCacheControl: { type?: string } | undefined = cacheControl;
+  if (finalCacheControl?.type === "ephemeral") {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") {
+        const msg = messages[i];
+        if (typeof msg.content === "string") {
+          msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+        } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+          const lastPart = msg.content[msg.content.length - 1] as any;
+          lastPart.cache_control = { type: "ephemeral" };
+        }
+        finalCacheControl = undefined; // 已手动注入，取消顶层控制
+        break;
+      }
+    }
+  }
+
   const payload: Record<string, unknown> = {
     model,
     messages,
@@ -2412,7 +2431,7 @@ async function handleOpenRouterFetch({
   if (toolChoice !== undefined) payload.tool_choice = toolChoice;
   if (reasoning) payload.reasoning = reasoning;
   if (providerRouting) payload.provider = providerRouting;
-  if (cacheControl) payload.cache_control = cacheControl;
+  if (finalCacheControl) payload.cache_control = finalCacheControl;
 
   const upstream = await fetch(endpoint, {
     method: "POST",
