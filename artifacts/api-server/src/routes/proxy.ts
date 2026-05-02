@@ -1630,10 +1630,26 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   if (safeRest.temperature !== undefined && safeRest.top_p !== undefined) {
     delete safeRest.top_p;
   }
-  const cacheControl = cache_control ?? { type: "ephemeral" };
-
   // Sanitize messages: fill in missing tool_use_id on tool_result blocks
   const sanitizedMessages = sanitizeAnthropicMessages(tagged.messages, selectedModel);
+
+  // 优化缓存策略：将断点移动到最后一条 assistant 消息，以提高动态 user 消息（如带时间戳）下的命中率
+  let finalCacheControl: { type?: string } | undefined = cacheControl ?? { type: "ephemeral" };
+  if (finalCacheControl?.type === "ephemeral") {
+    for (let i = sanitizedMessages.length - 1; i >= 0; i--) {
+      if (sanitizedMessages[i].role === "assistant") {
+        const msg = sanitizedMessages[i];
+        if (typeof msg.content === "string") {
+          msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+        } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+          const lastPart = msg.content[msg.content.length - 1] as any;
+          lastPart.cache_control = { type: "ephemeral" };
+        }
+        finalCacheControl = undefined; // 已手动注入，取消顶层控制
+        break;
+      }
+    }
+  }
 
   try {
     const client = makeLocalAnthropic();
@@ -1643,7 +1659,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       max_tokens: maxTokens,
       messages: sanitizedMessages,
       ...(system ? { system } : {}),
-      ...(cacheControl ? { cache_control: cacheControl } : {}),
+      ...(finalCacheControl ? { cache_control: finalCacheControl } : {}),
       ...thinkingParam,
       ...(mergedTools.length ? { tools: mergedTools } : {}),
       ...safeRest,
@@ -2738,6 +2754,24 @@ async function handleClaude({
     }
   }
 
+  // 优化缓存策略：将断点移动到最后一条 assistant 消息
+  let finalCacheControl: { type?: string } | undefined = effectiveCacheControl;
+  if (finalCacheControl?.type === "ephemeral") {
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      if (chatMessages[i].role === "assistant") {
+        const msg = chatMessages[i];
+        if (typeof msg.content === "string") {
+          msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+        } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+          const lastPart = msg.content[msg.content.length - 1] as any;
+          lastPart.cache_control = { type: "ephemeral" };
+        }
+        finalCacheControl = undefined; // 已手动注入，取消顶层控制
+        break;
+      }
+    }
+  }
+
   const buildCreateParams = () => ({
     model,
     max_tokens: maxTokens,
@@ -2749,7 +2783,7 @@ async function handleClaude({
     messages: chatMessages,
     ...(allAnthropicTools?.length ? { tools: allAnthropicTools } : {}),
     ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice } : {}),
-    ...(effectiveCacheControl ? { cache_control: effectiveCacheControl } : {}),
+    ...(finalCacheControl ? { cache_control: finalCacheControl } : {}),
   });
 
   const msgId = `msg_${Date.now()}`;
