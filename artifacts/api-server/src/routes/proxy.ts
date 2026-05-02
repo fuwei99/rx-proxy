@@ -369,6 +369,20 @@ function makeLocalOpenAI(): OpenAI {
   return new OpenAI({ apiKey, baseURL });
 }
 
+function makeLocalOpenRouterAnthropic(): Anthropic {
+  const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
+  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
+  if (!apiKey || !baseURL) {
+    throw new Error(
+      "OpenRouter integration is not configured. Please add the OpenRouter integration in Replit (Tools → Integrations) to use OpenRouter models."
+    );
+  }
+
+  // Anthropic SDK uses /v1/messages; normalize OpenRouter base URL to avoid /v1/v1/messages.
+  const normalizedBaseURL = baseURL.replace(/\/$/, "").replace(/\/v1$/, "");
+  return new Anthropic({ apiKey, baseURL: normalizedBaseURL });
+}
+
 function makeLocalAnthropic(): Anthropic {
   const apiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
@@ -609,6 +623,34 @@ function extractExtendedUsageMetrics(usage: unknown): ExtendedUsageMetrics | und
     cachedTokens: readFiniteNumber(promptDetails?.cached_tokens),
     cacheWriteTokens: readFiniteNumber(promptDetails?.cache_write_tokens),
     reasoningTokens: readFiniteNumber(completionDetails?.reasoning_tokens),
+  };
+
+  if (Object.values(metrics).every((v) => v === undefined)) return undefined;
+  return metrics;
+}
+
+function extractAnthropicUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const usageRecord = usage as Record<string, unknown>;
+  const inputDetails = usageRecord.input_tokens_details as Record<string, unknown> | undefined;
+  const outputDetails = usageRecord.output_tokens_details as Record<string, unknown> | undefined;
+  const promptTokens = readFiniteNumber(usageRecord.input_tokens);
+  const completionTokens = readFiniteNumber(usageRecord.output_tokens);
+  const totalTokens = readFiniteNumber(usageRecord.total_tokens)
+    ?? (promptTokens !== undefined || completionTokens !== undefined
+      ? (promptTokens ?? 0) + (completionTokens ?? 0)
+      : undefined);
+
+  const metrics: ExtendedUsageMetrics = {
+    totalTokens,
+    costUsd: readFiniteNumber(usageRecord.cost),
+    cachedTokens: readFiniteNumber(usageRecord.cache_read_input_tokens)
+      ?? readFiniteNumber(inputDetails?.cache_read_input_tokens)
+      ?? readFiniteNumber(inputDetails?.cached_tokens),
+    cacheWriteTokens: readFiniteNumber(usageRecord.cache_creation_input_tokens)
+      ?? readFiniteNumber(inputDetails?.cache_creation_input_tokens)
+      ?? readFiniteNumber(inputDetails?.cache_write_tokens),
+    reasoningTokens: readFiniteNumber(outputDetails?.reasoning_tokens),
   };
 
   if (Object.values(metrics).every((v) => v === undefined)) return undefined;
@@ -879,7 +921,7 @@ function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
 }
 
 router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Response) => {
-  const { model, messages, stream, max_tokens, temperature, top_p, tools, tool_choice, reasoning: clientReasoning, reasoning_effort: clientReasoningEffort } = req.body as {
+  const { model, messages, stream, max_tokens, temperature, top_p, tools, tool_choice, reasoning: clientReasoning, reasoning_effort: clientReasoningEffort, cache_control } = req.body as {
     model?: string;
     messages: OAIMessage[];
     stream?: boolean;
@@ -890,6 +932,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     tool_choice?: unknown;
     reasoning?: { effort?: string; enabled?: boolean };
     reasoning_effort?: string;
+    cache_control?: { type?: string };
   };
 
   // Convert top-level reasoning_effort → OpenRouter { effort } format (client-provided reasoning takes priority)
@@ -908,10 +951,11 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
   const isClaudeModel = provider === "anthropic";
   const isGeminiModel = provider === "gemini";
   const isOpenRouterModel = provider === "openrouter";
+  const isOpenRouterAnthropicModel = isOpenRouterModel && (selectedModel?.startsWith("anthropic/") ?? false);
   const shouldStream = stream ?? false;
   const startTime = Date.now();
 
-  const finalMessages = (isClaudeModel && getSillyTavernMode() && !tools?.length)
+  const finalMessages = ((isClaudeModel || isOpenRouterAnthropicModel) && getSillyTavernMode() && !tools?.length)
     ? [...messages, { role: "user" as const, content: "继续" }]
     : messages;
 
@@ -979,16 +1023,40 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         // Client-provided reasoning takes priority over the model-suffix-derived value
         const finalOrReasoning = resolvedClientReasoning ?? orReasoning;
 
-        const client = makeLocalOpenRouter();
-        const orImageModalities = OPENROUTER_IMAGE_TEXT_MODELS.has(orActualModel)
-          ? ["image", "text"] as const
-          : OPENROUTER_IMAGE_ONLY_MODELS.has(orActualModel)
-            ? ["image"] as const
+        if (orActualModel.startsWith("anthropic/")) {
+          const client = makeLocalOpenRouterAnthropic();
+          const modelMax = 128000;
+          const defaultMaxTokens = orThinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
+          const cacheControl = cache_control ?? { type: "ephemeral" };
+          result = await handleClaude({
+            req,
+            res,
+            client,
+            model: orActualModel,
+            messages: finalMessages,
+            stream: shouldStream,
+            maxTokens: max_tokens ?? defaultMaxTokens,
+            temperature,
+            topP: top_p,
+            thinking: orThinkingEnabled,
+            thinkingVisible: !!(orThinkingEnabled || orEffortMatch),
+            tools,
+            toolChoice: tool_choice,
+            cacheControl,
+            startTime,
+          });
+        } else {
+          const client = makeLocalOpenRouter();
+          const orImageModalities = OPENROUTER_IMAGE_TEXT_MODELS.has(orActualModel)
+            ? ["image", "text"] as const
+            : OPENROUTER_IMAGE_ONLY_MODELS.has(orActualModel)
+              ? ["image"] as const
+              : undefined;
+          const orProviderRouting = orActualModel.startsWith("anthropic/")
+            ? { order: ["Bedrock"], allow_fallbacks: true }
             : undefined;
-        const orProviderRouting = orActualModel.startsWith("anthropic/")
-          ? { order: ["Bedrock"], allow_fallbacks: true }
-          : undefined;
-        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: orProviderRouting });
+          result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: orProviderRouting });
+        }
       } else {
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -2380,7 +2448,7 @@ async function handleGemini({
 }
 
 async function handleClaude({
-  req, res, client, model, messages, stream, maxTokens, temperature, topP, thinking = false, thinkingVisible = false, tools, toolChoice, webSearch = false, use300k = false, startTime,
+  req, res, client, model, messages, stream, maxTokens, temperature, topP, thinking = false, thinkingVisible = false, tools, toolChoice, webSearch = false, use300k = false, cacheControl, startTime,
 }: {
   req: Request;
   res: Response;
@@ -2397,8 +2465,9 @@ async function handleClaude({
   toolChoice?: unknown;
   webSearch?: boolean;
   use300k?: boolean;
+  cacheControl?: { type?: string };
   startTime: number;
-}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   // Extract system prompt
   const systemMessages = messages
     .filter((m) => m.role === "system")
@@ -2455,6 +2524,7 @@ async function handleClaude({
     messages: chatMessages,
     ...(allAnthropicTools?.length ? { tools: allAnthropicTools } : {}),
     ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice } : {}),
+    ...(cacheControl ? { cache_control: cacheControl } : {}),
   });
 
   const msgId = `msg_${Date.now()}`;
@@ -2471,6 +2541,7 @@ async function handleClaude({
 
       let inputTokens = 0;
       let outputTokens = 0;
+      let usage: ExtendedUsageMetrics | undefined;
       let ttftMs: number | undefined;
       // Track current tool_use block index for streaming
       let currentToolIndex = -1;
@@ -2481,6 +2552,7 @@ async function handleClaude({
         logResponseDebug(req, "Claude stream response event", event);
         if (event.type === "message_start") {
           inputTokens = event.message.usage.input_tokens;
+          usage = extractAnthropicUsageMetrics(event.message.usage);
           writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`);
 
         } else if (event.type === "content_block_start") {
@@ -2512,6 +2584,8 @@ async function handleClaude({
 
         } else if (event.type === "message_delta") {
           outputTokens = event.usage.output_tokens;
+          const deltaUsage = extractAnthropicUsageMetrics(event.usage);
+          if (deltaUsage) usage = { ...usage, ...deltaUsage };
           const stopReason = event.delta.stop_reason;
           const finishReason = stopReason === "tool_use" ? "tool_calls" : (stopReason ?? "stop");
           writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens } })}\n\n`);
@@ -2520,7 +2594,12 @@ async function handleClaude({
 
       writeAndFlush(res, "data: [DONE]\n\n");
       res.end();
-      return { promptTokens: inputTokens, completionTokens: outputTokens, ttftMs };
+      return {
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        ttftMs,
+        usage: usage ? { ...usage, totalTokens: usage.totalTokens ?? (inputTokens + outputTokens) } : undefined,
+      };
     } finally {
       clearInterval(keepalive);
     }
@@ -2596,7 +2675,11 @@ async function handleClaude({
     };
     logResponseDebug(req, "Claude OpenAI-compatible response", responseJson);
     res.json(responseJson);
-    return { promptTokens: result.usage.input_tokens, completionTokens: result.usage.output_tokens };
+    return {
+      promptTokens: result.usage.input_tokens,
+      completionTokens: result.usage.output_tokens,
+      usage: extractAnthropicUsageMetrics(result.usage),
+    };
   }
 }
 
