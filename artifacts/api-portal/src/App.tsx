@@ -595,79 +595,6 @@ type ModelStat = {
   reasoningTokens?: number;
 };
 
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  "gpt-5.2": { input: 2.5, output: 10 },
-  "gpt-5.1": { input: 2.5, output: 10 },
-  "gpt-5": { input: 2.5, output: 10 },
-  "gpt-5-mini": { input: 0.15, output: 0.6 },
-  "gpt-5-nano": { input: 0.075, output: 0.3 },
-  "gpt-4.1": { input: 2, output: 8 },
-  "gpt-4.1-mini": { input: 0.4, output: 1.6 },
-  "gpt-4.1-nano": { input: 0.1, output: 0.4 },
-  "gpt-4o": { input: 2.5, output: 10 },
-  "gpt-4o-mini": { input: 0.15, output: 0.6 },
-  "gpt-4-turbo": { input: 10, output: 30 },
-  "gpt-4": { input: 30, output: 60 },
-  "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
-  "o4-mini": { input: 1.1, output: 4.4 },
-  "o3": { input: 10, output: 40 },
-  "o3-mini": { input: 1.1, output: 4.4 },
-  "o1": { input: 15, output: 60 },
-  "o1-mini": { input: 3, output: 12 },
-  "o1-pro": { input: 150, output: 600 },
-  "claude-opus-4-6": { input: 15, output: 75 },
-  "claude-opus-4-5": { input: 15, output: 75 },
-  "claude-opus-4-1": { input: 15, output: 75 },
-  "claude-sonnet-4-6": { input: 3, output: 15 },
-  "claude-sonnet-4-5": { input: 3, output: 15 },
-  "claude-haiku-4-5": { input: 0.8, output: 4 },
-  "claude-3-7-sonnet": { input: 3, output: 15 },
-  "claude-3-5-sonnet": { input: 3, output: 15 },
-  "claude-3-5-haiku": { input: 0.8, output: 4 },
-  "claude-3-opus": { input: 15, output: 75 },
-  "claude-3-sonnet": { input: 3, output: 15 },
-  "claude-3-haiku": { input: 0.25, output: 1.25 },
-  "gemini-3.1-pro": { input: 1.25, output: 10 },
-  "gemini-3-flash": { input: 0.15, output: 0.6 },
-  "gemini-2.5-pro": { input: 1.25, output: 10 },
-  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
-  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
-  "gemini-2.0-flash-lite": { input: 0.075, output: 0.3 },
-  "gemini-1.5-pro": { input: 1.25, output: 5 },
-  "gemini-1.5-flash": { input: 0.075, output: 0.3 },
-  "gemini-1.5-flash-8b": { input: 0.0375, output: 0.15 },
-  "grok-4": { input: 3, output: 15 },
-  "grok-4.1": { input: 3, output: 15 },
-  "grok-4.20": { input: 3, output: 15 },
-  "llama-4": { input: 0.2, output: 0.8 },
-  "deepseek-v3": { input: 0.27, output: 1.1 },
-  "deepseek-r1": { input: 0.55, output: 2.19 },
-  "mistral-small": { input: 0.1, output: 0.3 },
-  "qwen3": { input: 0.3, output: 1.2 },
-  "command-a": { input: 2.5, output: 10 },
-  "nova-premier": { input: 2.5, output: 10 },
-  "ernie-4.5": { input: 1, output: 4 },
-};
-
-const DEFAULT_PRICING = { input: 3, output: 15 };
-
-function getModelPrice(model: string): { input: number; output: number } {
-  if (MODEL_PRICING[model]) return MODEL_PRICING[model];
-  const stripped = model.replace(/^[a-z0-9_-]+\//, "");
-  if (MODEL_PRICING[stripped]) return MODEL_PRICING[stripped];
-  const base = stripped.replace(/-(thinking-visible|thinking|latest|preview)$/g, "").replace(/-\d{4}-\d{2}-\d{2}$/, "");
-  if (MODEL_PRICING[base]) return MODEL_PRICING[base];
-  for (const [key, val] of Object.entries(MODEL_PRICING)) {
-    if (stripped.startsWith(key) || base.startsWith(key)) return val;
-  }
-  return DEFAULT_PRICING;
-}
-
-function estimateModelCost(model: string, prompt: number, completion: number): number {
-  const p = getModelPrice(model);
-  return (prompt * p.input + completion * p.output) / 1_000_000;
-}
-
 function PageStats({
   baseUrl, apiKey, stats, statsError, onRefresh,
   addUrl, setAddUrl, addState, addMsg, onAddBackend, onRemoveBackend,
@@ -745,28 +672,6 @@ function PageStats({
   const totalModelCostActual = modelStats
     ? Object.values(modelStats).reduce((sum, ms) => sum + (ms.totalCostUsd ?? 0), 0)
     : null;
-
-  const totalModelCostEstimated = modelStats
-    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + estimateModelCost(model, ms.promptTokens, ms.completionTokens), 0)
-    : null;
-
-  const hasActualModelCost = modelStats
-    ? Object.values(modelStats).some((ms) => (ms.totalCostUsd ?? 0) > 0)
-    : false;
-
-  const totalModelCost = hasActualModelCost ? totalModelCostActual : totalModelCostEstimated;
-
-  const totalModelInputCost = modelStats
-    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + (ms.promptTokens * getModelPrice(model).input) / 1_000_000, 0)
-    : null;
-
-  const totalModelOutputCost = modelStats
-    ? Object.entries(modelStats).reduce((sum, [model, ms]) => sum + (ms.completionTokens * getModelPrice(model).output) / 1_000_000, 0)
-    : null;
-
-  const estimateCostFallback = (prompt: number, completion: number) => {
-    return (prompt * DEFAULT_PRICING.input + completion * DEFAULT_PRICING.output) / 1_000_000;
-  };
 
   const totals = stats ? Object.values(stats).reduce((acc, s) => ({
     calls: acc.calls + s.calls,
@@ -908,17 +813,17 @@ function PageStats({
                 <span style={{ fontSize: "15px" }}>&#128176;</span>
                 <span style={{ color: "#f59e0b" }}>开销</span>
                 <span style={{ fontSize: "10px", color: "#475569", marginLeft: "auto" }}>
-                  {hasActualModelCost ? "上游实测" : "按模型估算"}
+                  上游返回
                 </span>
               </div>
               <div>
                 <div style={subNumStyle}>总开销</div>
                 <div style={{ ...bigNumStyle, color: "#f59e0b" }}>
-                  ${((hasActualModelCost ? totals!.totalCostUsd : (totalModelCost ?? estimateCostFallback(totals!.promptTokens, totals!.completionTokens))) ?? 0).toFixed(2)}
+                  ${(totals!.totalCostUsd ?? totalModelCostActual ?? 0).toFixed(2)}
                 </div>
                 <div style={{ display: "flex", gap: "12px", marginTop: "4px" }}>
-                  <span style={{ fontSize: "11px", color: "#475569" }}>输入 <span style={{ color: "#f59e0b" }}>${(totalModelInputCost ?? (totals!.promptTokens * DEFAULT_PRICING.input / 1_000_000)).toFixed(2)}</span></span>
-                  <span style={{ fontSize: "11px", color: "#475569" }}>输出 <span style={{ color: "#f59e0b" }}>${(totalModelOutputCost ?? (totals!.completionTokens * DEFAULT_PRICING.output / 1_000_000)).toFixed(2)}</span></span>
+                  <span style={{ fontSize: "11px", color: "#475569" }}>输入 <span style={{ color: "#64748b" }}>--</span></span>
+                  <span style={{ fontSize: "11px", color: "#475569" }}>输出 <span style={{ color: "#64748b" }}>--</span></span>
                 </div>
               </div>
             </div>
@@ -992,7 +897,7 @@ function PageStats({
                   .filter(([, ms]) => ms.calls > 0)
                   .map(([model, ms]) => ({
                     model,
-                    cost: (ms.totalCostUsd ?? 0) > 0 ? (ms.totalCostUsd ?? 0) : estimateModelCost(model, ms.promptTokens, ms.completionTokens),
+                    cost: ms.totalCostUsd ?? 0,
                     calls: ms.calls,
                   }))
                   .sort((a, b) => b.cost - a.cost);
@@ -1026,7 +931,7 @@ function PageStats({
                 {Object.entries(stats).map(([label, s]) => {
                   const isEnabled = s.enabled !== false;
                   const isHealthy = s.health === "healthy";
-                  const cost = (s.totalCostUsd ?? 0) > 0 ? (s.totalCostUsd ?? 0) : estimateCostFallback(s.promptTokens, s.completionTokens);
+                  const cost = s.totalCostUsd ?? 0;
                   return (
                     <div key={label} style={{
                       background: isEnabled ? "rgba(0,0,0,0.2)" : "rgba(0,0,0,0.35)",

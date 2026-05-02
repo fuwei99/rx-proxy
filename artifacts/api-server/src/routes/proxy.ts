@@ -369,20 +369,6 @@ function makeLocalOpenAI(): OpenAI {
   return new OpenAI({ apiKey, baseURL });
 }
 
-function makeLocalOpenRouterAnthropic(): Anthropic {
-  const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
-  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
-  if (!apiKey || !baseURL) {
-    throw new Error(
-      "OpenRouter integration is not configured. Please add the OpenRouter integration in Replit (Tools → Integrations) to use OpenRouter models."
-    );
-  }
-
-  // Anthropic SDK uses /v1/messages; normalize OpenRouter base URL to avoid /v1/v1/messages.
-  const normalizedBaseURL = baseURL.replace(/\/$/, "").replace(/\/v1$/, "");
-  return new Anthropic({ apiKey, baseURL: normalizedBaseURL });
-}
-
 function makeLocalAnthropic(): Anthropic {
   const apiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
@@ -1025,26 +1011,20 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const finalOrReasoning = resolvedClientReasoning ?? orReasoning;
 
         if (orActualModel.startsWith("anthropic/")) {
-          const client = makeLocalOpenRouterAnthropic();
-          const modelMax = 128000;
-          const defaultMaxTokens = orThinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
           const cacheControl = cache_control ?? { type: "ephemeral" };
-          result = await handleClaude({
+          result = await handleOpenRouterFetch({
             req,
             res,
-            client,
             model: orActualModel,
             messages: finalMessages,
             stream: shouldStream,
-            maxTokens: max_tokens ?? defaultMaxTokens,
-            temperature,
-            topP: top_p,
-            thinking: orThinkingEnabled,
-            thinkingVisible: !!(orThinkingEnabled || orEffortMatch),
+            maxTokens: max_tokens,
             tools,
             toolChoice: tool_choice,
-            cacheControl,
             startTime,
+            reasoning: finalOrReasoning,
+            providerRouting: { order: ["Bedrock"], allow_fallbacks: true },
+            cacheControl,
           });
         } else {
           const client = makeLocalOpenRouter();
@@ -1611,6 +1591,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
       let inputTokens = 0;
       let outputTokens = 0;
+      let usageMetrics: ExtendedUsageMetrics | undefined;
 
       try {
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
@@ -1646,8 +1627,11 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
           logResponseDebug(req, "Claude /v1/messages stream response event", event);
           if (event.type === "message_start") {
             inputTokens = event.message.usage.input_tokens;
+            usageMetrics = extractAnthropicUsageMetrics(event.message.usage);
           } else if (event.type === "message_delta") {
             outputTokens = event.usage.output_tokens;
+            const deltaUsage = extractAnthropicUsageMetrics(event.usage);
+            if (deltaUsage) usageMetrics = { ...usageMetrics, ...deltaUsage };
           }
 
           writeAndFlush(res, `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
@@ -1676,11 +1660,21 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
         res.end();
         const dur = Date.now() - startTime;
-        recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel);
+        const finalUsageMetrics = usageMetrics
+          ? { ...usageMetrics, totalTokens: usageMetrics.totalTokens ?? (inputTokens + outputTokens) }
+          : undefined;
+        recordCallStat("local", dur, inputTokens, outputTokens, undefined, selectedModel, finalUsageMetrics);
         pushRequestLog({
           method: req.method, path: req.path, model: selectedModel,
           backend: "local", status: 200, duration: dur, stream: true,
-          promptTokens: inputTokens, completionTokens: outputTokens, level: "info",
+          promptTokens: inputTokens,
+          completionTokens: outputTokens,
+          totalTokens: finalUsageMetrics?.totalTokens ?? (inputTokens + outputTokens),
+          costUsd: finalUsageMetrics?.costUsd,
+          cachedTokens: finalUsageMetrics?.cachedTokens,
+          cacheWriteTokens: finalUsageMetrics?.cacheWriteTokens,
+          reasoningTokens: finalUsageMetrics?.reasoningTokens,
+          level: "info",
         });
       } finally {
         clearInterval(keepalive);
@@ -1703,13 +1697,22 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
             }
           : rawResult;
       logResponseDebug(req, "Claude /v1/messages non-stream response", resultWithMarkers);
-      const usage = (rawResult as { usage?: { input_tokens?: number; output_tokens?: number } }).usage ?? {};
+      const usage = (rawResult as { usage?: unknown }).usage;
+      const usageMetrics = extractAnthropicUsageMetrics(usage);
+      const usageRecord = (usage ?? {}) as { input_tokens?: number; output_tokens?: number };
       const dur = Date.now() - startTime;
-      recordCallStat("local", dur, usage.input_tokens ?? 0, usage.output_tokens ?? 0, undefined, selectedModel);
+      recordCallStat("local", dur, usageRecord.input_tokens ?? 0, usageRecord.output_tokens ?? 0, undefined, selectedModel, usageMetrics);
       pushRequestLog({
         method: req.method, path: req.path, model: selectedModel,
         backend: "local", status: 200, duration: dur, stream: false,
-        promptTokens: usage.input_tokens ?? 0, completionTokens: usage.output_tokens ?? 0, level: "info",
+        promptTokens: usageRecord.input_tokens ?? 0,
+        completionTokens: usageRecord.output_tokens ?? 0,
+        totalTokens: usageMetrics?.totalTokens ?? ((usageRecord.input_tokens ?? 0) + (usageRecord.output_tokens ?? 0)),
+        costUsd: usageMetrics?.costUsd,
+        cachedTokens: usageMetrics?.cachedTokens,
+        cacheWriteTokens: usageMetrics?.cacheWriteTokens,
+        reasoningTokens: usageMetrics?.reasoningTokens,
+        level: "info",
       });
       res.json(resultWithMarkers);
     }
@@ -2264,6 +2267,131 @@ async function handleOpenAI({
       usage,
     };
   }
+}
+
+async function handleOpenRouterFetch({
+  req, res, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, providerRouting, cacheControl,
+}: {
+  req: Request;
+  res: Response;
+  model: string;
+  messages: OAIMessage[];
+  stream: boolean;
+  maxTokens?: number;
+  tools?: OAITool[];
+  toolChoice?: unknown;
+  startTime: number;
+  reasoning?: { enabled: boolean } | { effort: string };
+  providerRouting?: Record<string, unknown>;
+  cacheControl?: { type?: string };
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
+  const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
+  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
+  if (!apiKey || !baseURL) {
+    throw new Error(
+      "OpenRouter integration is not configured. Please add the OpenRouter integration in Replit (Tools → Integrations) to use OpenRouter models."
+    );
+  }
+
+  const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const payload: Record<string, unknown> = {
+    model,
+    messages,
+    stream,
+  };
+  if (maxTokens) payload.max_tokens = maxTokens;
+  if (tools?.length) payload.tools = tools;
+  if (toolChoice !== undefined) payload.tool_choice = toolChoice;
+  if (reasoning) payload.reasoning = reasoning;
+  if (providerRouting) payload.provider = providerRouting;
+  if (cacheControl) payload.cache_control = cacheControl;
+
+  const upstream = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => "");
+    throw new Error(`OpenRouter error ${upstream.status}: ${errText}`);
+  }
+
+  if (!stream) {
+    const result = await upstream.json() as Record<string, unknown>;
+    const choices = (result.choices as Array<Record<string, unknown>> | undefined) ?? [];
+    for (const choice of choices) {
+      const msg = choice.message as Record<string, unknown> | undefined;
+      if (msg && msg.reasoning) {
+        msg.reasoning_content = msg.reasoning;
+        delete msg.reasoning;
+      }
+    }
+    logResponseDebug(req, "OpenRouter fetch non-stream response", result);
+    res.json(result);
+    const usage = extractExtendedUsageMetrics(result.usage);
+    const usageRecord = (result.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined) ?? {};
+    return {
+      promptTokens: usageRecord.prompt_tokens ?? 0,
+      completionTokens: usageRecord.completion_tokens ?? 0,
+      usage,
+    };
+  }
+
+  if (!upstream.body) {
+    throw new Error("OpenRouter stream response missing body");
+  }
+
+  setSseHeaders(res);
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let ttftMs: number | undefined;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let usage: ExtendedUsageMetrics | undefined;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunkText = decoder.decode(value, { stream: true });
+    writeAndFlush(res, chunkText);
+    buffer += chunkText;
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const raw = line.slice(5).trim();
+      if (!raw || raw === "[DONE]") continue;
+      try {
+        const chunk = JSON.parse(raw) as Record<string, unknown>;
+        const firstChoice = (chunk.choices as Array<Record<string, unknown>> | undefined)?.[0];
+        const delta = firstChoice?.delta as Record<string, unknown> | undefined;
+        if (ttftMs === undefined && (delta?.content || delta?.tool_calls)) {
+          ttftMs = Date.now() - startTime;
+        }
+        const chunkUsage = chunk.usage;
+        if (chunkUsage && typeof chunkUsage === "object") {
+          const usageRecord = chunkUsage as { prompt_tokens?: number; completion_tokens?: number };
+          promptTokens = usageRecord.prompt_tokens ?? promptTokens;
+          completionTokens = usageRecord.completion_tokens ?? completionTokens;
+          usage = extractExtendedUsageMetrics(chunkUsage) ?? usage;
+        }
+      } catch {
+      }
+    }
+  }
+
+  const tail = decoder.decode();
+  if (tail) writeAndFlush(res, tail);
+  res.end();
+  return { promptTokens, completionTokens, ttftMs, usage };
 }
 
 // ---------------------------------------------------------------------------
