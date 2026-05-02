@@ -748,12 +748,16 @@ function PageStats({
 
   const nodeLabels = stats ? Object.keys(stats) : [];
   const activeNode = (stats && stats[selectedNode]) ? selectedNode : (nodeLabels[0] ?? "local");
-  const nodeLogs = requestLogs
+  
+  const allNodeLogs = requestLogs
     .filter((l) => (l.backend ?? "local") === activeNode)
-    .slice(-80)
     .reverse();
+  const logsPerPage = 10;
+  const totalLogPages = Math.max(1, Math.ceil(allNodeLogs.length / logsPerPage));
+  const safeLogPage = Math.min(Math.max(1, nodeLogPage), totalLogPages);
+  const nodeLogs = allNodeLogs.slice((safeLogPage - 1) * logsPerPage, safeLogPage * logsPerPage);
 
-  const modelPalette = ["#b095fc", "#eedbfe", "#009688", "#9ca3af", "#f9a8d4", "#60a5fa", "#fde047", "#8b5cf6", "#fb923c", "#34d399"];
+  const modelPalette = ["#818cf8", "#6366f1", "#4f46e5", "#4338ca", "#3730a3", "#312e81", "#a78bfa", "#8b5cf6", "#7c3aed", "#6d28d9", "#c084fc", "#a855f7"];
   const allModelRows = modelStats
     ? Object.entries(modelStats)
       .filter(([, ms]) => ms.calls > 0)
@@ -1109,7 +1113,7 @@ function PageStats({
               {nodeLabels.map((label) => (
                 <button
                   key={label}
-                  onClick={() => setSelectedNode(label)}
+                  onClick={() => { setSelectedNode(label); setNodeLogPage(1); }}
                   style={{
                     padding: "4px 10px", borderRadius: "999px", fontSize: "11px", cursor: "pointer",
                     border: activeNode === label ? "1px solid rgba(129,140,248,0.55)" : "1px solid rgba(255,255,255,0.12)",
@@ -1122,29 +1126,76 @@ function PageStats({
                 </button>
               ))}
             </div>
-            {nodeLogs.length === 0 ? (
+            {allNodeLogs.length === 0 ? (
               <div style={{ fontSize: "12px", color: "#475569" }}>该节点暂无调用记录</div>
             ) : (
-              <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px" }}>
-                {nodeLogs.map((l) => (
-                  <div key={l.id} style={{
-                    display: "grid",
-                    gridTemplateColumns: "96px 1fr 60px 80px 120px",
-                    gap: "10px",
-                    padding: "8px 10px",
-                    borderBottom: "1px solid rgba(255,255,255,0.05)",
-                    alignItems: "center",
-                    fontSize: "11.5px",
-                  }}>
-                    <span style={{ color: "#64748b", fontFamily: "Menlo, monospace" }}>{new Date(l.time).toLocaleTimeString()}</span>
-                    <span style={{ color: "#94a3b8", fontFamily: "Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={l.model ?? "-"}>{l.model ?? "-"}</span>
-                    <span style={{ color: l.status >= 500 ? "#f87171" : "#4ade80" }}>{l.status}</span>
-                    <span style={{ color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{l.duration}ms</span>
-                    <span style={{ color: "#34d399", fontFamily: "Menlo, monospace" }}>
-                      {(l.totalTokens ?? ((l.promptTokens ?? 0) + (l.completionTokens ?? 0))).toLocaleString()} tk
-                    </span>
+              <div style={{ border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px", overflow: "hidden" }}>
+                <div style={{ width: "100%", overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "800px" }}>
+                    <thead>
+                      <tr style={{ background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.06)", textAlign: "left", fontSize: "11px", color: "#64748b" }}>
+                        <th style={{ padding: "10px", fontWeight: 500, width: "70px" }}>时间</th>
+                        <th style={{ padding: "10px", fontWeight: 500, minWidth: "150px" }}>模型</th>
+                        <th style={{ padding: "10px", fontWeight: 500 }}>状态</th>
+                        <th style={{ padding: "10px", fontWeight: 500 }}>耗时</th>
+                        <th style={{ padding: "10px", fontWeight: 500 }}>输入/输出</th>
+                        <th style={{ padding: "10px", fontWeight: 500 }}>缓存</th>
+                        <th style={{ padding: "10px", fontWeight: 500 }}>费用</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nodeLogs.map((l) => {
+                        const input = l.promptTokens ?? 0;
+                        const output = l.completionTokens ?? 0;
+                        return (
+                          <tr key={l.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)", fontSize: "11.5px", fontFamily: "Menlo, monospace" }}>
+                            <td style={{ padding: "8px 10px", color: "#94a3b8" }}>{new Date(l.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+                            <td style={{ padding: "8px 10px", color: "#cbd5e1" }}>
+                              <div style={{ maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={l.model ?? "-"}>
+                                {l.model ?? "-"}
+                              </div>
+                            </td>
+                            <td style={{ padding: "8px 10px", color: l.status >= 500 ? "#f87171" : "#4ade80" }}>{l.status}</td>
+                            <td style={{ padding: "8px 10px", color: "#e2e8f0" }}>{l.duration}ms</td>
+                            <td style={{ padding: "8px 10px" }}>
+                              <span style={{ color: "#a78bfa" }}>{input}</span> <span style={{ color: "#475569" }}>/</span> <span style={{ color: "#34d399" }}>{output}</span>
+                            </td>
+                            <td style={{ padding: "8px 10px" }}>
+                              {l.cachedTokens || l.cacheWriteTokens ? (
+                                <div style={{ display: "flex", gap: "6px" }}>
+                                  {l.cachedTokens ? <span style={{ color: "#22c55e", background: "rgba(34,197,94,0.1)", padding: "2px 4px", borderRadius: "4px", fontSize: "10px" }}>读 {l.cachedTokens}</span> : null}
+                                  {l.cacheWriteTokens ? <span style={{ color: "#06b6d4", background: "rgba(6,182,212,0.1)", padding: "2px 4px", borderRadius: "4px", fontSize: "10px" }}>写 {l.cacheWriteTokens}</span> : null}
+                                </div>
+                              ) : <span style={{ color: "#475569" }}>-</span>}
+                            </td>
+                            <td style={{ padding: "8px 10px", color: "#f59e0b" }}>{l.costUsd ? `$${l.costUsd.toFixed(6)}` : "-"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Pagination */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "rgba(0,0,0,0.15)", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: "12px", color: "#64748b" }}>
+                  <div>共 {allNodeLogs.length} 条记录</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <button
+                      disabled={safeLogPage <= 1}
+                      onClick={() => setNodeLogPage(p => p - 1)}
+                      style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: safeLogPage <= 1 ? "#475569" : "#cbd5e1", padding: "4px 8px", borderRadius: "4px", cursor: safeLogPage <= 1 ? "not-allowed" : "pointer" }}
+                    >
+                      上一页
+                    </button>
+                    <span style={{ margin: "0 6px", color: "#94a3b8" }}>{safeLogPage} / {totalLogPages}</span>
+                    <button
+                      disabled={safeLogPage >= totalLogPages}
+                      onClick={() => setNodeLogPage(p => p + 1)}
+                      style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: safeLogPage >= totalLogPages ? "#475569" : "#cbd5e1", padding: "4px 8px", borderRadius: "4px", cursor: safeLogPage >= totalLogPages ? "not-allowed" : "pointer" }}
+                    >
+                      下一页
+                    </button>
                   </div>
-                ))}
+                </div>
               </div>
             )}
           </Card>
@@ -1173,20 +1224,19 @@ function PageStats({
             )}
           </Card>
 
-          <Card style={{ marginBottom: "14px", padding: "0" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "15px", fontWeight: 700, color: "#e2e8f0" }}>
-                <span style={{ fontSize: "16px" }}>&#128337;</span>
+          <Card style={{ marginBottom: "14px", padding: "0", background: "rgba(255,255,255,0.98)", border: "1px solid #e2e8f0" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: "1px solid #f1f5f9" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px", fontWeight: 700, color: "#0f172a" }}>
                 <span>模型调用次数排行</span>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "13px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", fontSize: "13px" }}>
                 {[
                   { key: "cost-dist" as const, label: "消耗分布" },
                   { key: "cost-trend" as const, label: "消耗趋势" },
                   { key: "calls-share" as const, label: "调用次数分布" },
                   { key: "calls-rank" as const, label: "调用次数排行" },
                 ].map((tab, idx, arr) => (
-                  <div key={tab.key} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <div key={tab.key} style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                     <button
                       onClick={() => setAnalysisTab(tab.key)}
                       style={{
@@ -1194,14 +1244,14 @@ function PageStats({
                         border: "none",
                         cursor: "pointer",
                         padding: 0,
-                        color: analysisTab === tab.key ? "#e2e8f0" : "#64748b",
+                        color: analysisTab === tab.key ? "#0f172a" : "#94a3b8",
                         fontWeight: analysisTab === tab.key ? 700 : 500,
-                        fontSize: "13px",
+                        fontSize: "12.5px",
                       }}
                     >
                       {tab.label}
                     </button>
-                    {idx < arr.length - 1 && <span style={{ color: "#334155" }}>/</span>}
+                    {idx < arr.length - 1 && <span style={{ color: "#e2e8f0" }}>|</span>}
                   </div>
                 ))}
               </div>
@@ -1210,33 +1260,35 @@ function PageStats({
             <div style={{ padding: "18px" }}>
               {analysisTab === "cost-dist" && (
                 <>
-                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128202;</div>
-                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型消耗分布</div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：${modelAggList.reduce((s, m) => s + m.cost, 0).toFixed(2)}</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "16px" }}>总消耗统计 · $${modelAggList.reduce((s, m) => s + m.cost, 0).toFixed(2)}</div>
                   {timeBuckets.length === 0 || costTopModels.length === 0 ? (
-                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无消耗分布数据</div>
+                    <div style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "40px 0" }}>暂无消耗分布数据</div>
                   ) : (
                     <>
-                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(24px, 1fr))`, gap: "8px", alignItems: "end", height: "220px", marginBottom: "12px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${timeBuckets.length}, minmax(24px, 1fr))`, gap: "10px", alignItems: "end", height: "240px", marginBottom: "16px", position: "relative" }}>
+                        {/* Horizontal grid lines */}
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <div key={i} style={{ position: "absolute", left: 0, right: 0, top: `${(i * 100) / 4}%`, borderBottom: "1px dashed #f1f5f9", zIndex: 0 }} />
+                        ))}
                         {timeBuckets.map((bucket) => {
                           const total = Object.values(bucket.cost).reduce((a, b) => a + b, 0);
                           return (
-                            <div key={`cost-${bucket.ts}`} title={`${bucket.label} · $${total.toFixed(4)}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}>
-                              <div style={{ width: "100%", height: "180px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
+                            <div key={`cost-${bucket.ts}`} title={`${bucket.label} · $${total.toFixed(4)}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", zIndex: 1 }}>
+                              <div style={{ width: "100%", height: "200px", background: "#f8fafc", borderRadius: "4px", display: "flex", flexDirection: "column", justifyContent: "flex-end", overflow: "hidden" }}>
                                 {costTopModels.map((m) => {
                                   const v = bucket.cost[m.model] ?? 0;
                                   if (v <= 0) return null;
-                                  return <div key={m.model} style={{ height: `${(v / maxCostStack) * 100}%`, background: colorByModel.get(m.model) }} />;
+                                  return <div key={m.model} style={{ height: `${(v / maxCostStack) * 100}%`, background: colorByModel.get(m.model), opacity: 0.9 }} />;
                                 })}
                               </div>
-                              <span style={{ fontSize: "10px", color: "#64748b" }}>{bucket.label}</span>
+                              <span style={{ fontSize: "10px", color: "#94a3b8" }}>{bucket.label.split(" ")[1]}</span>
                             </div>
                           );
                         })}
                       </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", borderTop: "1px solid #f1f5f9", paddingTop: "14px" }}>
                         {costTopModels.map((m) => (
-                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#64748b" }}>
                             <span style={{ width: "8px", height: "8px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
                             <span>{m.model}</span>
                           </div>
@@ -1249,18 +1301,16 @@ function PageStats({
 
               {analysisTab === "cost-trend" && (
                 <>
-                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128200;</div>
-                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型消耗趋势</div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：${modelAggList.reduce((s, m) => s + m.cost, 0).toFixed(2)}</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "16px" }}>消耗趋势分析</div>
                   {timeBuckets.length < 2 || trendModels.length === 0 ? (
-                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无趋势数据</div>
+                    <div style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "40px 0" }}>暂无趋势数据</div>
                   ) : (
                     <>
-                      <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", background: "rgba(255,255,255,0.02)", padding: "8px" }}>
-                        <svg viewBox={`0 0 ${trendW} ${trendH}`} style={{ width: "100%", height: "240px" }}>
+                      <div style={{ height: "260px", marginBottom: "8px" }}>
+                        <svg viewBox={`0 0 ${trendW} ${trendH}`} style={{ width: "100%", height: "100%" }}>
                           {[0, 1, 2, 3, 4].map((i) => {
                             const y = trendPadY + ((trendH - trendPadY * 2) * i) / 4;
-                            return <line key={i} x1={trendPadX} y1={y} x2={trendW - trendPadX} y2={y} stroke="rgba(148,163,184,0.18)" strokeWidth="1" />;
+                            return <line key={i} x1={trendPadX} y1={y} x2={trendW - trendPadX} y2={y} stroke="#f1f5f9" strokeWidth="1" strokeDasharray="4 4" />;
                           })}
                           {trendModels.map((m) => {
                             const pts = timeBuckets.map((bucket, idx) => {
@@ -1270,22 +1320,27 @@ function PageStats({
                               return { x, y, v };
                             });
                             const d = pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-                            const c = colorByModel.get(m.model) ?? "#a78bfa";
+                            const c = colorByModel.get(m.model) ?? "#818cf8";
                             return (
                               <g key={m.model}>
-                                <path d={d} fill="none" stroke={c} strokeWidth="2.2" />
-                                {pts.map((p, idx) => <circle key={`${m.model}-${idx}`} cx={p.x} cy={p.y} r="3.5" fill={c} />)}
+                                <path d={d} fill="none" stroke={c} strokeWidth="2" />
+                                {pts.map((p, idx) => (
+                                  <g key={`${m.model}-${idx}`}>
+                                    <circle cx={p.x} cy={p.y} r="4" fill="#fff" stroke={c} strokeWidth="2" />
+                                    <circle cx={p.x} cy={p.y} r="1.5" fill={c} />
+                                  </g>
+                                ))}
                               </g>
                             );
                           })}
                         </svg>
                       </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "6px", fontSize: "10px", color: "#64748b" }}>
-                        {timeBuckets.map((b) => <span key={`xl-${b.ts}`}>{b.label}</span>)}
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px", fontSize: "10px", color: "#94a3b8", padding: "0 10px" }}>
+                        {timeBuckets.map((b) => <span key={`xl-${b.ts}`}>{b.label.split(" ")[1]}</span>)}
                       </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", marginTop: "10px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", borderTop: "1px solid #f1f5f9", paddingTop: "14px" }}>
                         {trendModels.map((m) => (
-                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#64748b" }}>
                             <span style={{ width: "8px", height: "8px", borderRadius: "999px", background: colorByModel.get(m.model) }} />
                             <span>{m.model}</span>
                           </div>
@@ -1298,27 +1353,25 @@ function PageStats({
 
               {analysisTab === "calls-share" && (
                 <>
-                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#128309;</div>
-                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型调用次数占比</div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：{callsShareTotal}</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "16px" }}>调用占比分布</div>
                   {callsShareModels.length === 0 || callsShareTotal === 0 ? (
-                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无调用次数占比数据</div>
+                    <div style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "40px 0" }}>暂无占比数据</div>
                   ) : (
-                    <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: "16px", alignItems: "center" }}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: "24px", alignItems: "center" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                         {callsShareModels.map((m) => (
-                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
-                            <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: colorByModel.get(m.model) }} />
-                            <span style={{ color: "#94a3b8", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.model}>{m.model}</span>
-                            <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{((m.calls / callsShareTotal) * 100).toFixed(1)}%</span>
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
+                            <span style={{ width: "10px", height: "10px", borderRadius: "50%", background: colorByModel.get(m.model) }} />
+                            <span style={{ color: "#475569", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.model}>{m.model}</span>
+                            <span style={{ color: "#0f172a", fontWeight: 600, fontFamily: "Menlo, monospace" }}>{((m.calls / callsShareTotal) * 100).toFixed(1)}%</span>
                           </div>
                         ))}
                       </div>
-                      <div style={{ display: "flex", justifyContent: "center" }}>
-                        <div style={{ width: "260px", height: "260px", borderRadius: "50%", background: `conic-gradient(${callsShareGradient})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          <div style={{ width: "142px", height: "142px", borderRadius: "50%", background: "hsl(222,47%,11%)", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
-                            <span style={{ fontSize: "12px", color: "#64748b" }}>总调用</span>
-                            <span style={{ fontSize: "18px", color: "#e2e8f0", fontFamily: "Menlo, monospace" }}>{callsShareTotal}</span>
+                      <div style={{ display: "flex", justifyContent: "center", padding: "10px" }}>
+                        <div style={{ width: "240px", height: "240px", borderRadius: "50%", background: `conic-gradient(${callsShareGradient})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "inset 0 0 10px rgba(0,0,0,0.05)" }}>
+                          <div style={{ width: "160px", height: "160px", borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", border: "1px solid #f1f5f9" }}>
+                            <span style={{ fontSize: "12px", color: "#94a3b8" }}>总调用量</span>
+                            <span style={{ fontSize: "20px", fontWeight: 700, color: "#0f172a", fontFamily: "Menlo, monospace" }}>{callsShareTotal}</span>
                           </div>
                         </div>
                       </div>
@@ -1329,29 +1382,30 @@ function PageStats({
 
               {analysisTab === "calls-rank" && (
                 <>
-                  <div style={{ fontSize: "36px", marginBottom: "4px", opacity: 0.2 }}>&#127942;</div>
-                  <div style={{ fontSize: "34px", fontWeight: 700, color: "#f1f5f9", lineHeight: 1 }}>模型调用次数排行</div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "14px" }}>总计：{callsShareTotal}</div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "16px" }}>模型调用次数排行</div>
                   {callsRankModels.length === 0 ? (
-                    <div style={{ fontSize: "12px", color: "#475569" }}>暂无调用排行数据</div>
+                    <div style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "40px 0" }}>暂无排行数据</div>
                   ) : (
                     <>
-                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${callsRankModels.length}, minmax(28px, 1fr))`, gap: "8px", alignItems: "end", height: "260px", marginBottom: "12px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${callsRankModels.length}, minmax(28px, 1fr))`, gap: "10px", alignItems: "end", height: "240px", marginBottom: "16px", position: "relative" }}>
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <div key={i} style={{ position: "absolute", left: 0, right: 0, top: `${(i * 100) / 4}%`, borderBottom: "1px dashed #f1f5f9", zIndex: 0 }} />
+                        ))}
                         {callsRankModels.map((m) => (
-                          <div key={m.model} title={`${m.model}: ${m.calls}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}>
-                            <div style={{ width: "100%", height: `${Math.max(4, (m.calls / maxCallStack) * 220)}px`, background: colorByModel.get(m.model), borderRadius: "6px 6px 0 0" }} />
-                            <span style={{ fontSize: "10px", color: "#64748b", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <div key={m.model} title={`${m.model}: ${m.calls}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", zIndex: 1 }}>
+                            <div style={{ width: "100%", height: `${Math.max(4, (m.calls / maxCallStack) * 200)}px`, background: colorByModel.get(m.model), borderRadius: "4px 4px 0 0", opacity: 0.9 }} />
+                            <span style={{ fontSize: "10px", color: "#94a3b8", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {m.model.split("/").pop() ?? m.model}
                             </span>
                           </div>
                         ))}
                       </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-                        {callsRankModels.slice(0, 6).map((m) => (
-                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", borderTop: "1px solid #f1f5f9", paddingTop: "14px" }}>
+                        {callsRankModels.slice(0, 12).map((m) => (
+                          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#64748b" }}>
                             <span style={{ width: "10px", height: "10px", borderRadius: "2px", background: colorByModel.get(m.model) }} />
-                            <span>{m.model}</span>
-                            <span style={{ color: "#cbd5e1", fontFamily: "Menlo, monospace" }}>{m.calls}</span>
+                            <span style={{ flexShrink: 0 }}>{m.model.split("/").pop()}</span>
+                            <span style={{ color: "#0f172a", fontWeight: 600, fontFamily: "Menlo, monospace" }}>{m.calls}</span>
                           </div>
                         ))}
                       </div>
