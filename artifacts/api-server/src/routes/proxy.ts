@@ -818,9 +818,13 @@ function addMissingThinkingSignatures(messages: OAIMessage[]): OAIMessage[] {
     const nextContent = msg.content.map((part) => {
       if (!part || typeof part !== "object") return part;
       const record = part as Record<string, unknown>;
+      const hasThinkingPayload =
+        typeof record.thinking === "string"
+        || typeof record.reasoning === "string"
+        || record.type === "thinking"
+        || record.type === "reasoning";
       if (
-        record.type === "thinking"
-        && typeof record.thinking === "string"
+        hasThinkingPayload
         && (record.signature === undefined || record.signature === null || record.signature === "")
       ) {
         changed = true;
@@ -829,6 +833,23 @@ function addMissingThinkingSignatures(messages: OAIMessage[]): OAIMessage[] {
       return part;
     });
     if (!changed) return msg;
+    return { ...msg, content: nextContent };
+  });
+}
+
+function stripThinkingBlocks(messages: OAIMessage[]): OAIMessage[] {
+  return messages.map((msg) => {
+    if (!Array.isArray(msg.content)) return msg;
+    const nextContent = msg.content.filter((part) => {
+      if (!part || typeof part !== "object") return true;
+      const record = part as Record<string, unknown>;
+      const isThinkingBlock =
+        record.type === "thinking"
+        || record.type === "reasoning"
+        || typeof record.thinking === "string"
+        || typeof record.reasoning === "string";
+      return !isThinkingBlock;
+    });
     return { ...msg, content: nextContent };
   });
 }
@@ -2317,30 +2338,44 @@ async function handleOpenRouterFetch({
 
   const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
   const normalizedMessages = addMissingThinkingSignatures(messages);
-  const payload: Record<string, unknown> = {
-    model,
-    messages: normalizedMessages,
-    stream,
+  const buildPayload = (outgoingMessages: OAIMessage[]): Record<string, unknown> => {
+    const payload: Record<string, unknown> = {
+      model,
+      messages: outgoingMessages,
+      stream,
+    };
+    if (maxTokens) payload.max_tokens = maxTokens;
+    if (tools?.length) payload.tools = tools;
+    if (toolChoice !== undefined) payload.tool_choice = toolChoice;
+    if (reasoning) payload.reasoning = reasoning;
+    if (providerRouting) payload.provider = providerRouting;
+    if (cacheControl) payload.cache_control = cacheControl;
+    return payload;
   };
-  if (maxTokens) payload.max_tokens = maxTokens;
-  if (tools?.length) payload.tools = tools;
-  if (toolChoice !== undefined) payload.tool_choice = toolChoice;
-  if (reasoning) payload.reasoning = reasoning;
-  if (providerRouting) payload.provider = providerRouting;
-  if (cacheControl) payload.cache_control = cacheControl;
 
-  const upstream = await fetch(endpoint, {
+  const postToOpenRouter = (outgoingMessages: OAIMessage[]) => fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(buildPayload(outgoingMessages)),
   });
+
+  let upstream = await postToOpenRouter(normalizedMessages);
 
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => "");
-    throw new Error(`OpenRouter error ${upstream.status}: ${errText}`);
+    if (errText.includes(".signature: Field required")) {
+      const fallbackMessages = stripThinkingBlocks(normalizedMessages);
+      upstream = await postToOpenRouter(fallbackMessages);
+      if (!upstream.ok) {
+        const fallbackErrText = await upstream.text().catch(() => "");
+        throw new Error(`OpenRouter error ${upstream.status}: ${fallbackErrText}`);
+      }
+    } else {
+      throw new Error(`OpenRouter error ${upstream.status}: ${errText}`);
+    }
   }
 
   if (!stream) {
