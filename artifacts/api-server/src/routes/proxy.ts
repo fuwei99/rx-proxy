@@ -1601,6 +1601,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       let inputTokens = 0;
       let outputTokens = 0;
       let usageMetrics: ExtendedUsageMetrics | undefined;
+      let seenMessageStop = false;
 
       try {
         const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
@@ -1641,6 +1642,16 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
             outputTokens = event.usage.output_tokens;
             const deltaUsage = extractAnthropicUsageMetrics(event.usage);
             if (deltaUsage) usageMetrics = { ...usageMetrics, ...deltaUsage };
+          } else if (event.type === "message_stop") {
+            seenMessageStop = true;
+          }
+
+          const eventRecordUsage = (eventRecord.usage ?? undefined) as unknown;
+          const genericUsage = extractAnthropicUsageMetrics(eventRecordUsage);
+          if (genericUsage) usageMetrics = { ...usageMetrics, ...genericUsage };
+          const usageOutputTokens = (eventRecord.usage as { output_tokens?: number } | undefined)?.output_tokens;
+          if (typeof usageOutputTokens === "number") {
+            outputTokens = usageOutputTokens;
           }
 
           writeAndFlush(res, `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
@@ -1666,7 +1677,9 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
             writeAndFlush(res, `event: content_block_stop\ndata: ${JSON.stringify(stopEvent)}\n\n`);
           }
         }
-        writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        if (!seenMessageStop) {
+          writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        }
         res.end();
         const dur = Date.now() - startTime;
         const finalUsageMetrics = usageMetrics
