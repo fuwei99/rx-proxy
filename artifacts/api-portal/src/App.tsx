@@ -73,7 +73,6 @@ const GEMINI_MODELS: ModelEntry[] = [
   { id: "gemini-3-flash-preview-nothinking", label: "Gemini 3 Flash Preview No Thinking", provider: "gemini", desc: "minimal 思考档位", context: "1M", badge: "tools" },
   { id: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", provider: "gemini", desc: "medium 思考档位", context: "1M", badge: "thinking" },
   { id: "gemini-3-flash-preview-high", label: "Gemini 3 Flash Preview High", provider: "gemini", desc: "high 思考档位", context: "1M", badge: "thinking" },
-  { id: "gemini-3.1-flash-lite-nothinking", label: "Gemini 3.1 Flash Lite No Thinking", provider: "gemini", desc: "低延迟 minimal 档位", context: "1M", badge: "tools" },
 ];
 
 const OPENROUTER_MODELS: ModelEntry[] = [

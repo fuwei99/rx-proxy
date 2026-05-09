@@ -45,43 +45,38 @@ type GeminiModelAlias = {
 const GEMINI_MODEL_ALIASES: Record<string, GeminiModelAlias> = {
   "gemini-3.1-pro-preview-low": {
     actualModel: "gemini-3.1-pro-preview",
-    thinkingConfig: { thinkingLevel: "low" },
+    thinkingConfig: { thinkingLevel: "low", includeThoughts: true },
     description: "Gemini 3.1 Pro Preview, low thinking",
   },
   "gemini-3.1-pro-preview-high": {
     actualModel: "gemini-3.1-pro-preview",
-    thinkingConfig: { thinkingLevel: "high" },
+    thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
     description: "Gemini 3.1 Pro Preview, high thinking",
   },
   "gemini-2.5-pro-nothinking": {
     actualModel: "gemini-2.5-pro",
-    thinkingConfig: { thinkingBudget: 128 },
+    thinkingConfig: { thinkingBudget: 128, includeThoughts: true },
     description: "Gemini 2.5 Pro, minimum thinking budget",
   },
   "gemini-2.5-pro": {
     actualModel: "gemini-2.5-pro",
-    thinkingConfig: { thinkingBudget: 32768 },
+    thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
     description: "Gemini 2.5 Pro, maximum thinking budget",
   },
   "gemini-3-flash-preview-nothinking": {
     actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "minimal" },
+    thinkingConfig: { thinkingLevel: "minimal", includeThoughts: true },
     description: "Gemini 3 Flash Preview, minimal thinking",
   },
   "gemini-3-flash-preview": {
     actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "medium" },
+    thinkingConfig: { thinkingLevel: "medium", includeThoughts: true },
     description: "Gemini 3 Flash Preview, medium thinking",
   },
   "gemini-3-flash-preview-high": {
     actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "high" },
+    thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
     description: "Gemini 3 Flash Preview, high thinking",
-  },
-  "gemini-3.1-flash-lite-nothinking": {
-    actualModel: "gemini-3.1-flash-lite",
-    thinkingConfig: { thinkingLevel: "minimal" },
-    description: "Gemini 3.1 Flash Lite, minimal thinking",
   },
 };
 const GEMINI_MODELS = Object.entries(GEMINI_MODEL_ALIASES).map(([id, meta]) => ({ id, description: meta.description }));
@@ -685,6 +680,32 @@ const CLAUDE_HAIKU_45_RATES: ClaudeCostRates = {
   cacheReadPerMTok: 0.1,
 };
 
+type GeminiCostRates = { inputPerMTok: number; outputPerMTok: number; cacheReadPerMTok: number };
+
+function getGeminiCostRates(model: string | undefined, promptTokens: number): GeminiCostRates | undefined {
+  if (!model) return undefined;
+  const normalized = model.toLowerCase();
+  const over200k = promptTokens > 200_000;
+
+  if (normalized.startsWith("gemini-3.1-pro-preview")) {
+    return over200k
+      ? { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4 }
+      : { inputPerMTok: 2, outputPerMTok: 12, cacheReadPerMTok: 0.2 };
+  }
+
+  if (normalized.startsWith("gemini-3-flash-preview")) {
+    return { inputPerMTok: 0.5, outputPerMTok: 3, cacheReadPerMTok: 0.05 };
+  }
+
+  if (normalized.startsWith("gemini-2.5-pro")) {
+    return over200k
+      ? { inputPerMTok: 2.5, outputPerMTok: 15, cacheReadPerMTok: 0.25 }
+      : { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125 };
+  }
+
+  return undefined;
+}
+
 function getClaudeFallbackCostRates(model?: string): ClaudeCostRates | undefined {
   if (!model) return undefined;
   const normalized = model.toLowerCase().replace(/^anthropic\//, "").replace(/\./g, "-");
@@ -707,6 +728,26 @@ function withEstimatedCostIfMissing(
   usage?: ExtendedUsageMetrics,
 ): ExtendedUsageMetrics | undefined {
   if (usage?.costUsd !== undefined) return usage;
+
+  const geminiRates = getGeminiCostRates(model, promptTokens);
+  if (geminiRates) {
+    const cachedTokens = usage?.cachedTokens ?? 0;
+    const reasoningTokens = usage?.reasoningTokens ?? 0;
+    const billableInputTokens = Math.max(0, promptTokens - cachedTokens);
+    const billableOutputTokens = completionTokens + reasoningTokens;
+    const estimatedCostUsd = (
+      billableInputTokens * geminiRates.inputPerMTok
+      + cachedTokens * geminiRates.cacheReadPerMTok
+      + billableOutputTokens * geminiRates.outputPerMTok
+    ) / 1_000_000;
+
+    return {
+      ...(usage ?? {}),
+      totalTokens: usage?.totalTokens ?? (promptTokens + completionTokens + reasoningTokens),
+      costUsd: estimatedCostUsd,
+    };
+  }
+
   const rates = getClaudeFallbackCostRates(model);
   if (!rates) return usage;
 
@@ -943,16 +984,17 @@ router.post(/^\/v1(?:beta)?\/models\/([^/]+):(generateContent|streamGenerateCont
 
     const result = await handleGeminiNative({ req, res, selectedModel, alias, body: req.body, stream, startTime });
     const duration = Date.now() - startTime;
-    recordCallStat("local", duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, result.usage);
+    const finalUsage = withEstimatedCostIfMissing(selectedModel, result.promptTokens, result.completionTokens, result.usage);
+    recordCallStat("local", duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, finalUsage);
     pushRequestLog({
       method: req.method, path: req.path, model: selectedModel,
       backend: "local", provider: "gemini", status: 200, duration, stream,
       promptTokens: result.promptTokens, completionTokens: result.completionTokens,
-      totalTokens: result.usage?.totalTokens ?? result.promptTokens + result.completionTokens,
-      costUsd: result.usage?.costUsd,
-      cachedTokens: result.usage?.cachedTokens,
-      cacheWriteTokens: result.usage?.cacheWriteTokens,
-      reasoningTokens: result.usage?.reasoningTokens,
+      totalTokens: finalUsage?.totalTokens ?? result.promptTokens + result.completionTokens,
+      costUsd: finalUsage?.costUsd,
+      cachedTokens: finalUsage?.cachedTokens,
+      cacheWriteTokens: finalUsage?.cacheWriteTokens,
+      reasoningTokens: finalUsage?.reasoningTokens,
       level: "info",
     });
   } catch (err) {
