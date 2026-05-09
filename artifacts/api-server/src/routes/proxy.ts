@@ -877,10 +877,11 @@ type AnthropicImageSource =
   | { type: "url"; url: string };
 
 type AnthropicContentPart =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; cache_control?: { type?: string; ttl?: string } }
   | { type: "image"; source: AnthropicImageSource }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentPart[] }
+  | Record<string, unknown>;
 
 type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContentPart[] };
 
@@ -1560,6 +1561,407 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
   return cleaned;
 }
 
+function normalizeOpenRouterClaudeModel(model: string): string {
+  if (!model.startsWith("anthropic/")) return model;
+  const withoutSuffix = stripVisibleSuffix(model)
+    .replace(/-thinking$/, "")
+    .replace(/-search$/, "");
+  return withoutSuffix;
+}
+
+function isSupportedOpenRouterClaudeModel(model: string): boolean {
+  return /^anthropic\/claude-opus-4\.(7|6|5)$/.test(normalizeOpenRouterClaudeModel(model));
+}
+
+function shouldRouteAnthropicMessagesViaOpenRouter(model: string): boolean {
+  return model.startsWith("anthropic/") && isSupportedOpenRouterClaudeModel(model);
+}
+
+function toOpenRouterClaudeModel(model: string): string {
+  return normalizeOpenRouterClaudeModel(model);
+}
+
+function hasAnthropicCacheControl(system: unknown, messages: AnthropicMessage[]): boolean {
+  const blockHasCache = (block: unknown): boolean =>
+    !!block && typeof block === "object" && !!(block as Record<string, unknown>).cache_control;
+
+  if (Array.isArray(system) && system.some(blockHasCache)) return true;
+  return messages.some((msg) => Array.isArray(msg.content) && msg.content.some(blockHasCache));
+}
+
+function withDefaultAnthropicCacheControl(system: unknown, messages: AnthropicMessage[]): AnthropicMessage[] {
+  if (hasAnthropicCacheControl(system, messages)) return messages;
+  const next = messages.map((msg) => ({
+    ...msg,
+    content: Array.isArray(msg.content) ? [...msg.content] : msg.content,
+  })) as AnthropicMessage[];
+
+  for (let i = next.length - 1; i >= 0; i--) {
+    const msg = next[i];
+    if (msg.role !== "assistant") continue;
+    if (typeof msg.content === "string") {
+      msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+      return next;
+    }
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const block = msg.content[j] as Record<string, unknown>;
+      if (block.type === "text") {
+        msg.content[j] = { ...block, cache_control: { type: "ephemeral" } };
+        return next;
+      }
+    }
+  }
+
+  return next;
+}
+
+function mapClaudeEffortToOpenRouterVerbosity(model: string, effort: unknown): string | undefined {
+  if (typeof effort !== "string") return undefined;
+  const normalized = effort.toLowerCase();
+  const openRouterModel = normalizeOpenRouterClaudeModel(model);
+  if (openRouterModel.endsWith("4.7")) {
+    return ["low", "medium", "high", "xhigh", "max"].includes(normalized) ? normalized : undefined;
+  }
+  if (openRouterModel.endsWith("4.6")) {
+    if (normalized === "xhigh") return "max";
+    return ["low", "medium", "high", "max"].includes(normalized) ? normalized : undefined;
+  }
+  if (openRouterModel.endsWith("4.5")) {
+    if (normalized === "xhigh" || normalized === "max") return "high";
+    return ["low", "medium", "high"].includes(normalized) ? normalized : undefined;
+  }
+  return undefined;
+}
+
+function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<string, unknown>, rest: Record<string, unknown>): void {
+  const thinking = rest.thinking as Record<string, unknown> | undefined;
+  if (thinking && !rest.reasoning) {
+    if (thinking.type === "adaptive") {
+      payload.reasoning = { enabled: true };
+    } else if (thinking.type === "enabled" && typeof thinking.budget_tokens === "number") {
+      payload.reasoning = { max_tokens: thinking.budget_tokens };
+    }
+  }
+  delete payload.thinking;
+
+  const outputConfig = rest.output_config as Record<string, unknown> | undefined;
+  const verbosity = mapClaudeEffortToOpenRouterVerbosity(model, outputConfig?.effort);
+  if (verbosity && !rest.verbosity) payload.verbosity = verbosity;
+  delete payload.output_config;
+}
+
+function anthropicContentToOpenAI(content: string | AnthropicContentPart[]): string | OAIContentPart[] {
+  if (typeof content === "string") return content;
+
+  const parts: OAIContentPart[] = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      const p = part as { text?: string; cache_control?: { type?: string; ttl?: string } };
+      parts.push({
+        type: "text",
+        text: p.text ?? "",
+        ...(p.cache_control ? { cache_control: p.cache_control } : {}),
+      });
+      continue;
+    }
+    if (part.type === "image") {
+      const source = (part as { source?: AnthropicImageSource }).source;
+      if (!source) continue;
+      const url = source.type === "base64"
+        ? `data:${source.media_type};base64,${source.data}`
+        : source.url;
+      parts.push({ type: "image_url", image_url: { url } });
+      continue;
+    }
+    // OpenAI-compatible chat history has no signed Anthropic thinking block.
+    // Drop thinking history instead of leaking it as user-visible text.
+  }
+
+  return parts;
+}
+
+function anthropicMessagesToOpenAI(system: unknown, messages: AnthropicMessage[]): OAIMessage[] {
+  const out: OAIMessage[] = [];
+  if (typeof system === "string" && system.trim()) {
+    out.push({ role: "system", content: system });
+  } else if (Array.isArray(system) && system.length > 0) {
+    out.push({ role: "system", content: anthropicContentToOpenAI(system as AnthropicContentPart[]) });
+  }
+
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      if (typeof msg.content === "string") {
+        out.push({ role: "assistant", content: msg.content });
+        continue;
+      }
+
+      const textParts: AnthropicContentPart[] = [];
+      const toolCalls: OAIToolCall[] = [];
+      for (const part of msg.content) {
+        if (part.type === "tool_use") {
+          const tool = part as { id?: string; name?: string; input?: unknown };
+          toolCalls.push({
+            id: tool.id ?? `toolu_${toolCalls.length}`,
+            type: "function",
+            function: {
+              name: tool.name ?? "tool",
+              arguments: JSON.stringify(tool.input ?? {}),
+            },
+          });
+        } else {
+          textParts.push(part);
+        }
+      }
+
+      const content = textParts.length ? anthropicContentToOpenAI(textParts) : "";
+      out.push({
+        role: "assistant",
+        content,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      });
+      continue;
+    }
+
+    if (typeof msg.content === "string") {
+      out.push({ role: "user", content: msg.content });
+      continue;
+    }
+
+    const userParts: AnthropicContentPart[] = [];
+    for (const part of msg.content) {
+      if (part.type === "tool_result") {
+        const toolResult = part as { tool_use_id?: string; content?: string | AnthropicContentPart[] };
+        const toolContent = typeof toolResult.content === "string"
+          ? toolResult.content
+          : JSON.stringify(toolResult.content ?? "");
+        out.push({
+          role: "tool",
+          tool_call_id: toolResult.tool_use_id ?? "toolu_unknown",
+          content: toolContent,
+        });
+      } else {
+        userParts.push(part);
+      }
+    }
+    if (userParts.length > 0) {
+      out.push({ role: "user", content: anthropicContentToOpenAI(userParts) });
+    }
+  }
+
+  return out;
+}
+
+function anthropicToolsToOpenAI(tools: unknown[] | undefined): OAITool[] | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((tool) => {
+    const t = tool as Record<string, unknown>;
+    return {
+      type: "function",
+      function: {
+        name: String(t.name ?? "tool"),
+        description: typeof t.description === "string" ? t.description : "",
+        parameters: t.input_schema ?? { type: "object", properties: {} },
+      },
+    };
+  });
+}
+
+function anthropicToolChoiceToOpenAI(toolChoice: unknown): unknown {
+  if (!toolChoice || typeof toolChoice !== "object") return toolChoice;
+  const choice = toolChoice as Record<string, unknown>;
+  if (choice.type === "auto") return "auto";
+  if (choice.type === "none") return "none";
+  if (choice.type === "any") return "required";
+  if (choice.type === "tool" && typeof choice.name === "string") {
+    return { type: "function", function: { name: choice.name } };
+  }
+  return toolChoice;
+}
+
+function openAIMessageToAnthropicContent(message: Record<string, unknown> | undefined): AnthropicContentPart[] {
+  if (!message) return [{ type: "text", text: "" }];
+  const content: AnthropicContentPart[] = [];
+
+  const msgContent = message.content;
+  if (typeof msgContent === "string" && msgContent.length > 0) {
+    content.push({ type: "text", text: msgContent });
+  } else if (Array.isArray(msgContent)) {
+    for (const part of msgContent as Record<string, unknown>[]) {
+      if (part.type === "text" && typeof part.text === "string") {
+        content.push({ type: "text", text: part.text });
+      }
+    }
+  }
+
+  const toolCalls = message.tool_calls;
+  if (Array.isArray(toolCalls)) {
+    for (const raw of toolCalls as Record<string, unknown>[]) {
+      const fn = raw.function as Record<string, unknown> | undefined;
+      let input: unknown = {};
+      if (typeof fn?.arguments === "string" && fn.arguments.trim()) {
+        try { input = JSON.parse(fn.arguments); } catch { input = {}; }
+      }
+      content.push({
+        type: "tool_use",
+        id: typeof raw.id === "string" ? raw.id : `toolu_${content.length}`,
+        name: typeof fn?.name === "string" ? fn.name : "tool",
+        input,
+      });
+    }
+  }
+
+  return content.length ? content : [{ type: "text", text: "" }];
+}
+
+function mapOpenAIFinishReasonToAnthropic(reason: unknown): string | null {
+  if (reason === "tool_calls" || reason === "function_call") return "tool_use";
+  if (reason === "length") return "max_tokens";
+  if (reason === "stop") return "end_turn";
+  return typeof reason === "string" ? reason : null;
+}
+
+function anthropicStopReasonToOpenAI(reason: unknown): string | undefined {
+  if (reason === "max_tokens") return "length";
+  if (reason === "tool_use") return "tool_calls";
+  if (reason === "end_turn" || reason === "stop_sequence") return "stop";
+  return undefined;
+}
+
+async function handleAnthropicMessagesViaOpenRouter({
+  req, res, model, messages, system, stream, maxTokens, cacheControl, tools, toolChoice, rest, startTime,
+}: {
+  req: Request;
+  res: Response;
+  model: string;
+  messages: AnthropicMessage[];
+  system?: unknown;
+  stream: boolean;
+  maxTokens: number;
+  cacheControl?: { type?: string; ttl?: string };
+  tools?: unknown[];
+  toolChoice?: unknown;
+  rest: Record<string, unknown>;
+  startTime: number;
+}): Promise<void> {
+  const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
+  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
+  if (!apiKey || !baseURL) {
+    throw new Error("OpenRouter integration is not configured. Set AI_INTEGRATIONS_OPENROUTER_API_KEY and AI_INTEGRATIONS_OPENROUTER_BASE_URL.");
+  }
+
+  const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const openAIModel = toOpenRouterClaudeModel(model);
+  const bridgeMessages = cacheControl
+    ? messages
+    : withDefaultAnthropicCacheControl(system, messages);
+  const payload: Record<string, unknown> = {
+    ...rest,
+    model: openAIModel,
+    messages: anthropicMessagesToOpenAI(system, bridgeMessages),
+    stream: false,
+    max_tokens: maxTokens,
+  };
+  const convertedTools = anthropicToolsToOpenAI(tools);
+  if (convertedTools?.length) payload.tools = convertedTools;
+  const convertedToolChoice = anthropicToolChoiceToOpenAI(toolChoice);
+  if (convertedToolChoice !== undefined) payload.tool_choice = convertedToolChoice;
+  if (cacheControl) payload.cache_control = cacheControl;
+  if (rest.stop_sequences && !rest.stop) {
+    payload.stop = rest.stop_sequences;
+    delete payload.stop_sequences;
+  }
+  applyAnthropicThinkingForOpenRouter(model, payload, rest);
+
+  const upstream = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => "");
+    throw new Error(`OpenRouter Anthropic bridge error ${upstream.status}: ${errText}`);
+  }
+
+  const result = await upstream.json() as Record<string, unknown>;
+  logResponseDebug(req, "OpenRouter Anthropic bridge response", result);
+
+  const choice = ((result.choices as Record<string, unknown>[] | undefined) ?? [])[0];
+  const message = choice?.message as Record<string, unknown> | undefined;
+  const usage = (result.usage as Record<string, unknown> | undefined) ?? {};
+  const inputTokens = Number(usage.prompt_tokens) || 0;
+  const outputTokens = Number(usage.completion_tokens) || 0;
+  const anthropicUsage = {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_read_input_tokens: (usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens ?? 0,
+    cache_creation_input_tokens: (usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cache_write_tokens ?? 0,
+  };
+  const anthropicContent = openAIMessageToAnthropicContent(message);
+  const stopReason = mapOpenAIFinishReasonToAnthropic(choice?.finish_reason);
+  const responseJson = {
+    id: typeof result.id === "string" ? result.id : `msg_${Date.now()}`,
+    type: "message",
+    role: "assistant",
+    model,
+    content: anthropicContent,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: anthropicUsage,
+  };
+
+  const dur = Date.now() - startTime;
+  const finalUsageMetrics = withEstimatedCostIfMissing(openAIModel, inputTokens, outputTokens, extractExtendedUsageMetrics(result.usage));
+  recordCallStat("openrouter", dur, inputTokens, outputTokens, undefined, model, finalUsageMetrics);
+  pushRequestLog({
+    method: req.method, path: req.path, model,
+    backend: "openrouter", status: 200, duration: dur, stream,
+    promptTokens: inputTokens,
+    completionTokens: outputTokens,
+    totalTokens: finalUsageMetrics?.totalTokens ?? (inputTokens + outputTokens),
+    costUsd: finalUsageMetrics?.costUsd,
+    cachedTokens: finalUsageMetrics?.cachedTokens,
+    cacheWriteTokens: finalUsageMetrics?.cacheWriteTokens,
+    reasoningTokens: finalUsageMetrics?.reasoningTokens,
+    level: "info",
+  });
+
+  if (!stream) {
+    res.json(responseJson);
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  writeAndFlush(res, `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { ...responseJson, content: [] } })}\n\n`);
+  anthropicContent.forEach((block, index) => {
+    const startBlock = block.type === "text"
+      ? { type: "text", text: "" }
+      : block.type === "thinking"
+        ? { type: "thinking", thinking: "", signature: "" }
+        : block.type === "tool_use"
+          ? { type: "tool_use", id: block.id, name: block.name, input: {} }
+          : block;
+    writeAndFlush(res, `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index, content_block: startBlock })}\n\n`);
+    if (block.type === "text") {
+      writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } })}\n\n`);
+    } else if (block.type === "thinking" && typeof block.thinking === "string") {
+      writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: block.thinking } })}\n\n`);
+    } else if (block.type === "tool_use") {
+      writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) } })}\n\n`);
+    }
+    writeAndFlush(res, `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index })}\n\n`);
+  });
+  writeAndFlush(res, `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
+  writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+  res.end();
+}
+
 router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) => {
   const body = req.body as {
     model?: string;
@@ -1581,8 +1983,10 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const appendSearchReferenceText = isSearchModel && tagged.visibleEnabled;
   const hideSearchToolFromClient = isSearchModel && (tagged.invisibleEnabled || tagged.visibleEnabled);
 
-  // Reject disabled models
-  if (!isModelEnabled(rawModel)) {
+  const routeViaOpenRouter = shouldRouteAnthropicMessagesViaOpenRouter(rawModel);
+
+  // Reject disabled local models. OpenRouter bridge models are gated by the bridge allow-list above.
+  if (!routeViaOpenRouter && !isModelEnabled(rawModel)) {
     res.status(403).json({ error: { type: "invalid_request_error", message: `Model '${rawModel}' is disabled on this gateway` } });
     return;
   }
@@ -1633,8 +2037,42 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   // Sanitize messages: fill in missing tool_use_id on tool_result blocks
   const sanitizedMessages = sanitizeAnthropicMessages(tagged.messages, selectedModel);
 
+  if (routeViaOpenRouter) {
+    try {
+      await handleAnthropicMessagesViaOpenRouter({
+        req,
+        res,
+        model: selectedModel,
+        messages: sanitizedMessages,
+        system,
+        stream: shouldStream,
+        maxTokens,
+        cacheControl: cache_control,
+        tools: mergedTools,
+        toolChoice: safeRest.tool_choice,
+        rest: safeRest,
+        startTime,
+      });
+    } catch (err: unknown) {
+      recordErrorStat("openrouter");
+      const errMsg = err instanceof Error ? err.message : "Unknown error";
+      req.log.error({ err }, "/v1/messages OpenRouter bridge request failed");
+      pushRequestLog({
+        method: req.method, path: req.path, model: selectedModel,
+        backend: "openrouter", status: 500, duration: Date.now() - startTime,
+        stream: shouldStream, level: "error", error: errMsg,
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: { type: "api_error", message: errMsg } });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
+    return;
+  }
+
   // 优化缓存策略：将断点移动到最后一条 assistant 消息，以提高动态 user 消息（如带时间戳）下的命中率
-  let finalCacheControl: { type?: string } | undefined = cacheControl ?? { type: "ephemeral" };
+  let finalCacheControl: { type?: string } | undefined = cache_control ?? { type: "ephemeral" };
   if (finalCacheControl?.type === "ephemeral") {
     for (let i = sanitizedMessages.length - 1; i >= 0; i--) {
       if (sanitizedMessages[i].role === "assistant") {
