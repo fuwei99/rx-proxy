@@ -1638,11 +1638,16 @@ function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<stri
   if (thinking && !rest.reasoning) {
     if (thinking.type === "adaptive") {
       payload.reasoning = { enabled: true };
+      delete payload.thinking;
     } else if (thinking.type === "enabled" && typeof thinking.budget_tokens === "number") {
       payload.reasoning = { max_tokens: thinking.budget_tokens };
+      delete payload.thinking;
+    } else {
+      payload.thinking = thinking;
     }
+  } else if (!thinking) {
+    delete payload.thinking;
   }
-  delete payload.thinking;
 
   const outputConfig = rest.output_config as Record<string, unknown> | undefined;
   const verbosity = mapClaudeEffortToOpenRouterVerbosity(model, outputConfig?.effort);
@@ -1781,6 +1786,31 @@ function anthropicToolChoiceToOpenAI(toolChoice: unknown): unknown {
 function openAIMessageToAnthropicContent(message: Record<string, unknown> | undefined): AnthropicContentPart[] {
   if (!message) return [{ type: "text", text: "" }];
   const content: AnthropicContentPart[] = [];
+
+  const reasoningDetails = message.reasoning_details;
+  if (Array.isArray(reasoningDetails)) {
+    for (const detail of reasoningDetails as Record<string, unknown>[]) {
+      const text = typeof detail.text === "string"
+        ? detail.text
+        : typeof detail.reasoning === "string"
+          ? detail.reasoning
+          : undefined;
+      if (text && text.trim()) {
+        content.push({
+          type: "thinking",
+          thinking: text,
+          ...(typeof detail.signature === "string" ? { signature: detail.signature } : {}),
+        });
+      }
+    }
+  }
+
+  if (!content.some((block) => block.type === "thinking")) {
+    const reasoning = message.reasoning_content ?? message.reasoning;
+    if (typeof reasoning === "string" && reasoning.trim()) {
+      content.push({ type: "thinking", thinking: reasoning });
+    }
+  }
 
   const msgContent = message.content;
   if (typeof msgContent === "string" && msgContent.length > 0) {
