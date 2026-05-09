@@ -76,7 +76,11 @@ const OPENROUTER_EFFORT_BASE = [
 ];
 // Base (plain) variants of these models default to thinking if reasoning is omitted;
 // must explicitly send effort:"none" to disable it.
-const OPENROUTER_EFFORT_NONE_SET = new Set(["minimax/minimax-m2.7", "z-ai/glm-5.1", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro"]);
+const OPENROUTER_EFFORT_NONE_SET = new Set([
+  "anthropic/claude-opus-4.7", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.5",
+  "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash",
+  "minimax/minimax-m2.7", "z-ai/glm-5.1", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro",
+]);
 
 // Image models that return images alongside text — inject modalities:["image","text"]
 const OPENROUTER_IMAGE_TEXT_MODELS = new Set([
@@ -1633,7 +1637,7 @@ function mapClaudeEffortToOpenRouterVerbosity(model: string, effort: unknown): s
   return undefined;
 }
 
-function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<string, unknown>, rest: Record<string, unknown>): void {
+function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<string, unknown>, rest: Record<string, unknown>, modelThinkingEnabled = false): void {
   const thinking = rest.thinking as Record<string, unknown> | undefined;
   if (thinking && !rest.reasoning) {
     if (thinking.type === "adaptive") {
@@ -1645,6 +1649,12 @@ function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<stri
     } else {
       payload.thinking = thinking;
     }
+  } else if (!thinking && modelThinkingEnabled && !rest.reasoning) {
+    payload.reasoning = { enabled: true };
+    delete payload.thinking;
+  } else if (!thinking && !rest.reasoning) {
+    payload.reasoning = { effort: "none" };
+    delete payload.thinking;
   } else if (!thinking) {
     delete payload.thinking;
   }
@@ -1858,7 +1868,7 @@ function anthropicStopReasonToOpenAI(reason: unknown): string | undefined {
 }
 
 async function handleAnthropicMessagesViaOpenRouter({
-  req, res, model, messages, system, stream, maxTokens, cacheControl, tools, toolChoice, rest, startTime,
+  req, res, model, messages, system, stream, maxTokens, cacheControl, tools, toolChoice, rest, startTime, modelThinkingEnabled = false,
 }: {
   req: Request;
   res: Response;
@@ -1872,6 +1882,7 @@ async function handleAnthropicMessagesViaOpenRouter({
   toolChoice?: unknown;
   rest: Record<string, unknown>;
   startTime: number;
+  modelThinkingEnabled?: boolean;
 }): Promise<void> {
   const apiKey = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
@@ -1900,7 +1911,7 @@ async function handleAnthropicMessagesViaOpenRouter({
     payload.stop = rest.stop_sequences;
     delete payload.stop_sequences;
   }
-  applyAnthropicThinkingForOpenRouter(model, payload, rest);
+  applyAnthropicThinkingForOpenRouter(model, payload, rest, modelThinkingEnabled);
 
   const upstream = await fetch(endpoint, {
     method: "POST",
@@ -2082,6 +2093,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         toolChoice: safeRest.tool_choice,
         rest: safeRest,
         startTime,
+        modelThinkingEnabled: thinkingEnabled,
       });
     } catch (err: unknown) {
       recordErrorStat("openrouter");
