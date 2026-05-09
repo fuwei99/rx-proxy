@@ -36,10 +36,55 @@ const ANTHROPIC_300K_BASE_MODELS = [
   "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
 ];
 
-const GEMINI_BASE_MODELS = [
-  "gemini-3.1-pro-preview", "gemini-3-flash-preview",
-  "gemini-2.5-pro", "gemini-2.5-flash",
-];
+type GeminiModelAlias = {
+  actualModel: string;
+  thinkingConfig?: Record<string, unknown>;
+  description: string;
+};
+
+const GEMINI_MODEL_ALIASES: Record<string, GeminiModelAlias> = {
+  "gemini-3.1-pro-preview-low": {
+    actualModel: "gemini-3.1-pro-preview",
+    thinkingConfig: { thinkingLevel: "low" },
+    description: "Gemini 3.1 Pro Preview, low thinking",
+  },
+  "gemini-3.1-pro-preview-high": {
+    actualModel: "gemini-3.1-pro-preview",
+    thinkingConfig: { thinkingLevel: "high" },
+    description: "Gemini 3.1 Pro Preview, high thinking",
+  },
+  "gemini-2.5-pro-nothinking": {
+    actualModel: "gemini-2.5-pro",
+    thinkingConfig: { thinkingBudget: 128 },
+    description: "Gemini 2.5 Pro, minimum thinking budget",
+  },
+  "gemini-2.5-pro": {
+    actualModel: "gemini-2.5-pro",
+    thinkingConfig: { thinkingBudget: 32768 },
+    description: "Gemini 2.5 Pro, maximum thinking budget",
+  },
+  "gemini-3-flash-preview-nothinking": {
+    actualModel: "gemini-3-flash-preview",
+    thinkingConfig: { thinkingLevel: "minimal" },
+    description: "Gemini 3 Flash Preview, minimal thinking",
+  },
+  "gemini-3-flash-preview": {
+    actualModel: "gemini-3-flash-preview",
+    thinkingConfig: { thinkingLevel: "medium" },
+    description: "Gemini 3 Flash Preview, medium thinking",
+  },
+  "gemini-3-flash-preview-high": {
+    actualModel: "gemini-3-flash-preview",
+    thinkingConfig: { thinkingLevel: "high" },
+    description: "Gemini 3 Flash Preview, high thinking",
+  },
+  "gemini-3.1-flash-lite-nothinking": {
+    actualModel: "gemini-3.1-flash-lite",
+    thinkingConfig: { thinkingLevel: "minimal" },
+    description: "Gemini 3.1 Flash Lite, minimal thinking",
+  },
+};
+const GEMINI_MODELS = Object.entries(GEMINI_MODEL_ALIASES).map(([id, meta]) => ({ id, description: meta.description }));
 
 const OPENROUTER_FEATURED = [
   "x-ai/grok-4.20", "x-ai/grok-4.1-fast", "x-ai/grok-4-fast",
@@ -115,9 +160,7 @@ const ALL_MODELS = [
     { id: `${id}-thinking` },
   ]),
   ...ANTHROPIC_SEARCH_MODELS.map((id) => ({ id })),
-  ...GEMINI_BASE_MODELS.flatMap((id) => [
-    { id }, { id: `${id}-thinking` },
-  ]),
+  ...GEMINI_MODELS.map((m) => ({ id: m.id, description: m.description })),
   ...OPENROUTER_FEATURED.map((id) => ({ id })),
   ...OPENROUTER_THINKING_MODELS.map((id) => ({ id })),
   ...OPENROUTER_EFFORT_MODELS.map((id) => ({ id })),
@@ -170,10 +213,7 @@ for (const id of ANTHROPIC_SEARCH_MODELS) { MODEL_PROVIDER_MAP.set(id, "anthropi
 for (const base of ANTHROPIC_300K_BASE_MODELS) {
   MODEL_PROVIDER_MAP.set(`${base}-300k-thinking`, "anthropic");
 }
-for (const base of GEMINI_BASE_MODELS) {
-  MODEL_PROVIDER_MAP.set(base, "gemini");
-  MODEL_PROVIDER_MAP.set(`${base}-thinking`, "gemini");
-}
+for (const { id } of GEMINI_MODELS) { MODEL_PROVIDER_MAP.set(id, "gemini"); }
 for (const id of OPENROUTER_FEATURED) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
 for (const id of OPENROUTER_THINKING_MODELS) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
 for (const id of OPENROUTER_EFFORT_MODELS) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
@@ -496,7 +536,7 @@ export const statsReady: Promise<void> = (async () => {
       const modelsRaw = (saved as { models?: Record<string, ModelStat> }).models;
 
       for (const [label, raw] of Object.entries(backendsRaw)) {
-        if (raw && typeof raw === "object" && "calls" in (raw as Record<string, unknown>)) {
+        if (raw && typeof raw === "object" && "calls" in (raw as unknown as Record<string, unknown>)) {
           statsMap.set(label, {
             calls:            Number((raw as BackendStat).calls)            || 0,
             errors:           Number((raw as BackendStat).errors)           || 0,
@@ -599,6 +639,12 @@ function readFiniteNumber(value: unknown): number | undefined {
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function extractExtendedUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
@@ -794,16 +840,19 @@ function requireApiKey(req: Request, res: Response, next: () => void) {
 
   const authHeader = req.headers["authorization"];
   const xApiKey = req.headers["x-api-key"];
+  const xGoogApiKey = req.headers["x-goog-api-key"];
 
   let providedKey: string | undefined;
   if (authHeader && authHeader.startsWith("Bearer ")) {
     providedKey = authHeader.slice(7);
   } else if (typeof xApiKey === "string") {
     providedKey = xApiKey;
+  } else if (typeof xGoogApiKey === "string") {
+    providedKey = xGoogApiKey;
   }
 
   if (!providedKey) {
-    res.status(401).json({ error: { message: "Missing API key (provide Authorization: Bearer <key> or x-api-key header)", type: "invalid_request_error" } });
+    res.status(401).json({ error: { message: "Missing API key (provide Authorization: Bearer <key>, x-api-key, or x-goog-api-key header)", type: "invalid_request_error" } });
     return;
   }
   if (providedKey !== proxyKey) {
@@ -839,7 +888,7 @@ router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
       object: "model",
       created: 1700000000,
       owned_by: "replit-proxy",
-      description: m.description,
+      description: (m as { description?: string }).description,
     })),
     _meta: {
       active_backends: pool.length,
@@ -852,6 +901,78 @@ router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // Image format conversion: OpenAI image_url → Anthropic image
 // ---------------------------------------------------------------------------
+
+router.get("/v1beta/models", requireApiKeyWithQuery, (_req: Request, res: Response) => {
+  res.json({
+    models: GEMINI_MODELS
+      .filter((m) => isModelEnabled(m.id))
+      .map((m) => ({
+        name: `models/${m.id}`,
+        version: "001",
+        displayName: m.id,
+        description: m.description,
+        supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+      })),
+  });
+});
+
+router.post(/^\/v1(?:beta)?\/models\/([^/]+):(generateContent|streamGenerateContent)$/, requireApiKeyWithQuery, async (req: Request, res: Response) => {
+  const requestedModel = decodeURIComponent(String(req.params[0] ?? ""));
+  const action = String(req.params[1] ?? "");
+  const stream = action === "streamGenerateContent";
+  const startTime = Date.now();
+
+  try {
+    const selectedModel = stripVisibleSuffix(requestedModel.replace(/^models\//, ""));
+    if (!isModelEnabled(selectedModel)) {
+      res.status(403).json({ error: { message: `Model '${selectedModel}' is disabled on this gateway`, type: "invalid_request_error", code: "model_disabled" } });
+      return;
+    }
+    if (MODEL_PROVIDER_MAP.get(selectedModel) !== "gemini") {
+      res.status(404).json({ error: { message: `Gemini native endpoint only supports Gemini provider models. '${selectedModel}' is not available here.`, type: "invalid_request_error", code: "model_not_found" } });
+      return;
+    }
+    const alias = resolveGeminiAlias(selectedModel);
+    if (!alias) {
+      res.status(404).json({ error: { message: `Unknown Gemini model '${selectedModel}'`, type: "invalid_request_error", code: "model_not_found" } });
+      return;
+    }
+
+    req.log.info({ model: selectedModel, upstreamModel: alias.actualModel, stream }, "Gemini native request");
+    req.log.info({ payload: JSON.stringify(req.body) }, "Gemini native full payload");
+
+    const result = await handleGeminiNative({ req, res, selectedModel, alias, body: req.body, stream, startTime });
+    const duration = Date.now() - startTime;
+    recordCallStat("local", duration, result.promptTokens, result.completionTokens, result.ttftMs, selectedModel, result.usage);
+    pushRequestLog({
+      method: req.method, path: req.path, model: selectedModel,
+      backend: "local", provider: "gemini", status: 200, duration, stream,
+      promptTokens: result.promptTokens, completionTokens: result.completionTokens,
+      totalTokens: result.usage?.totalTokens ?? result.promptTokens + result.completionTokens,
+      costUsd: result.usage?.costUsd,
+      cachedTokens: result.usage?.cachedTokens,
+      cacheWriteTokens: result.usage?.cacheWriteTokens,
+      reasoningTokens: result.usage?.reasoningTokens,
+      level: "info",
+    });
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    recordErrorStat("local");
+    const message = err instanceof Error ? err.message : String(err);
+    req.log.error({ err }, "Gemini native request failed");
+    pushRequestLog({
+      method: req.method, path: req.path, model: requestedModel,
+      backend: "local", provider: "gemini", status: 500, duration, stream,
+      level: "error", error: message,
+    });
+    if (!res.headersSent) {
+      res.status(500).json({ error: { message, type: "server_error" } });
+    } else if (!res.writableEnded) {
+      writeAndFlush(res, `data: ${JSON.stringify({ error: { message } })}\n\n`);
+      res.end();
+    }
+  }
+});
 
 type OAIContentPart =
   | { type: "text"; text: string }
@@ -989,13 +1110,23 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
 
   // Convert top-level reasoning_effort → OpenRouter { effort } format (client-provided reasoning takes priority)
   const resolvedClientReasoning: { effort: string } | { enabled: boolean } | undefined =
-    clientReasoning ?? (clientReasoningEffort ? { effort: clientReasoningEffort } : undefined);
+    typeof clientReasoning?.effort === "string"
+      ? { effort: clientReasoning.effort }
+      : typeof clientReasoning?.enabled === "boolean"
+        ? { enabled: clientReasoning.enabled }
+        : clientReasoningEffort
+          ? { effort: clientReasoningEffort }
+          : undefined;
 
   // Normalize: strip legacy -visible suffix before any other processing
   const selectedModel = model ? stripVisibleSuffix(model) : model;
+  if (!selectedModel) {
+    res.status(400).json({ error: { message: "Missing required field 'model'", type: "invalid_request_error" } });
+    return;
+  }
 
   // Reject disabled models early
-  if (selectedModel && !isModelEnabled(selectedModel)) {
+  if (!isModelEnabled(selectedModel)) {
     res.status(403).json({ error: { message: `Model '${selectedModel}' is disabled on this gateway`, type: "invalid_request_error", code: "model_disabled" } });
     return;
   }
@@ -1048,9 +1179,12 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const cacheControl = cache_control ?? { type: "ephemeral" };
         result = await handleClaude({ req, res, client, model: resolvedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, temperature, topP: top_p, thinking: thinkingEnabled, thinkingVisible: thinkingEnabled, tools, toolChoice: tool_choice, webSearch, use300k: is300k, cacheControl, startTime });
       } else if (isGeminiModel) {
-        const thinkingEnabled = selectedModel.endsWith("-thinking");
-        const actualModel = thinkingEnabled ? selectedModel.replace(/-thinking$/, "") : selectedModel;
-        result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, thinkingVisible: thinkingEnabled, startTime });
+        const geminiAlias = selectedModel ? resolveGeminiAlias(selectedModel) : undefined;
+        if (!geminiAlias) {
+          res.status(404).json({ error: { message: `Unknown Gemini model '${selectedModel}'`, type: "invalid_request_error", code: "model_not_found" } });
+          return;
+        }
+        result = await handleGemini({ req, res, model: geminiAlias.actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinkingConfig: geminiAlias.thinkingConfig, startTime });
       } else if (isOpenRouterModel) {
         // Detect effort-based models: <base>-low or <base>-high (always visible)
         const orEffortMatch = selectedModel.match(/^(.+)-(low|high)$/);
@@ -1060,8 +1194,8 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         let orReasoning: { enabled: boolean } | { effort: string } | undefined;
 
         if (orEffortMatch) {
-          orActualModel = orEffortMatch[1];
-          orReasoning = { effort: orEffortMatch[2] };
+          orActualModel = orEffortMatch[1] ?? selectedModel;
+          orReasoning = { effort: orEffortMatch[2] ?? "high" };
         } else {
           orActualModel = orThinkingEnabled ? selectedModel.replace(/-thinking$/, "") : selectedModel;
           if (orThinkingEnabled) {
@@ -1188,20 +1322,59 @@ const SERVER_TOOL_BLOCK_TYPES = new Set(["server_tool_use", "web_search_tool_res
 const SEARCH_INVISIBLE_TAG = "<||search-invisible||>";
 const SEARCH_VISIBLE_TAG = "<||search-visible||>";
 
+function stripSearchControlTagsFromText(text: string): { text: string; invisibleEnabled: boolean; visibleEnabled: boolean; changed: boolean } {
+  const invisibleEnabled = text.includes(SEARCH_INVISIBLE_TAG);
+  const visibleEnabled = text.includes(SEARCH_VISIBLE_TAG);
+  if (!invisibleEnabled && !visibleEnabled) {
+    return { text, invisibleEnabled, visibleEnabled, changed: false };
+  }
+  return {
+    text: text.split(SEARCH_INVISIBLE_TAG).join("").split(SEARCH_VISIBLE_TAG).join(""),
+    invisibleEnabled,
+    visibleEnabled,
+    changed: true,
+  };
+}
+
+function stripSearchControlTagsFromSystem(system: unknown): { system: unknown; invisibleEnabled: boolean; visibleEnabled: boolean } {
+  if (typeof system === "string") {
+    const stripped = stripSearchControlTagsFromText(system);
+    return { system: stripped.changed ? stripped.text : system, invisibleEnabled: stripped.invisibleEnabled, visibleEnabled: stripped.visibleEnabled };
+  }
+
+  if (!Array.isArray(system)) {
+    return { system, invisibleEnabled: false, visibleEnabled: false };
+  }
+
+  let invisibleEnabled = false;
+  let visibleEnabled = false;
+  let changed = false;
+  const nextSystem = system.map((block) => {
+    if (!block || typeof block !== "object") return block;
+    const record = block as Record<string, unknown>;
+    if (record.type !== "text" || typeof record.text !== "string") return block;
+    const stripped = stripSearchControlTagsFromText(record.text);
+    invisibleEnabled ||= stripped.invisibleEnabled;
+    visibleEnabled ||= stripped.visibleEnabled;
+    if (!stripped.changed) return block;
+    changed = true;
+    return { ...record, text: stripped.text };
+  });
+
+  return { system: changed ? nextSystem : system, invisibleEnabled, visibleEnabled };
+}
+
 function stripSearchControlTagsFromMessages(messages: AnthropicMessage[]): { messages: AnthropicMessage[]; invisibleEnabled: boolean; visibleEnabled: boolean } {
   let invisibleEnabled = false;
   let visibleEnabled = false;
-  const tags = [SEARCH_INVISIBLE_TAG, SEARCH_VISIBLE_TAG];
 
   const cleaned = messages.map((msg) => {
     if (typeof msg.content === "string") {
-      const textContent = msg.content;
-      if (!tags.some((t) => textContent.includes(t))) return msg;
-      if (textContent.includes(SEARCH_INVISIBLE_TAG)) invisibleEnabled = true;
-      if (textContent.includes(SEARCH_VISIBLE_TAG)) visibleEnabled = true;
-      let content = textContent;
-      for (const tag of tags) content = content.split(tag).join("");
-      return { ...msg, content } as AnthropicMessage;
+      const stripped = stripSearchControlTagsFromText(msg.content);
+      if (!stripped.changed) return msg;
+      invisibleEnabled ||= stripped.invisibleEnabled;
+      visibleEnabled ||= stripped.visibleEnabled;
+      return { ...msg, content: stripped.text } as AnthropicMessage;
     }
 
     if (!Array.isArray(msg.content)) return msg;
@@ -1209,14 +1382,12 @@ function stripSearchControlTagsFromMessages(messages: AnthropicMessage[]): { mes
     let changed = false;
     const nextContent = (msg.content as Record<string, unknown>[]).map((block) => {
       if (block.type !== "text" || typeof block.text !== "string") return block;
-      const text = block.text as string;
-      if (!tags.some((t) => text.includes(t))) return block;
-      if (text.includes(SEARCH_INVISIBLE_TAG)) invisibleEnabled = true;
-      if (text.includes(SEARCH_VISIBLE_TAG)) visibleEnabled = true;
+      const stripped = stripSearchControlTagsFromText(block.text as string);
+      if (!stripped.changed) return block;
+      invisibleEnabled ||= stripped.invisibleEnabled;
+      visibleEnabled ||= stripped.visibleEnabled;
       changed = true;
-      let cleanedText = text;
-      for (const tag of tags) cleanedText = cleanedText.split(tag).join("");
-      return { ...block, text: cleanedText };
+      return { ...block, text: stripped.text };
     });
 
     if (!changed) return msg;
@@ -2166,9 +2337,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   const { model, messages, system, stream, max_tokens, cache_control, tools: clientTools, ...rest } = body;
   const rawModel = stripVisibleSuffix(model ?? "claude-sonnet-4-5");
   const isSearchModel = /^claude-opus-4[-.]6-search$/i.test(rawModel);
+  const taggedSystem = stripSearchControlTagsFromSystem(system);
   const tagged = stripSearchControlTagsFromMessages(messages);
-  const appendSearchReferenceText = isSearchModel && tagged.visibleEnabled;
-  const hideSearchToolFromClient = isSearchModel && (tagged.invisibleEnabled || tagged.visibleEnabled);
+  const searchInvisibleEnabled = tagged.invisibleEnabled || taggedSystem.invisibleEnabled;
+  const searchVisibleEnabled = tagged.visibleEnabled || taggedSystem.visibleEnabled;
+  const appendSearchReferenceText = isSearchModel && searchVisibleEnabled;
+  const hideSearchToolFromClient = isSearchModel && (searchInvisibleEnabled || searchVisibleEnabled);
 
   const routeViaOpenRouter = shouldRouteAnthropicMessagesViaOpenRouter(rawModel);
 
@@ -2231,7 +2405,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         res,
         model: selectedModel,
         messages: sanitizedMessages,
-        system,
+        system: taggedSystem.system as string | { type: string; text: string }[] | undefined,
         stream: shouldStream,
         maxTokens,
         cacheControl: cache_control,
@@ -2284,7 +2458,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       model: selectedModel,
       max_tokens: maxTokens,
       messages: sanitizedMessages,
-      ...(system ? { system } : {}),
+      ...(taggedSystem.system ? { system: taggedSystem.system } : {}),
       ...(finalCacheControl ? { cache_control: finalCacheControl } : {}),
       ...thinkingParam,
       ...(mergedTools.length ? { tools: mergedTools } : {}),
@@ -2905,12 +3079,13 @@ async function handleOpenAI({
     messages: messages as Parameters<typeof client.chat.completions.create>[0]["messages"],
     stream,
   };
-  if (maxTokens) (params as Record<string, unknown>)["max_completion_tokens"] = maxTokens;
-  if (tools?.length) (params as Record<string, unknown>)["tools"] = tools;
-  if (toolChoice !== undefined) (params as Record<string, unknown>)["tool_choice"] = toolChoice;
-  if (reasoning) (params as Record<string, unknown>)["reasoning"] = reasoning;
-  if (imageModalities) (params as Record<string, unknown>)["modalities"] = imageModalities;
-  if (providerRouting) (params as Record<string, unknown>)["provider"] = providerRouting;
+  const paramsRecord = params as unknown as Record<string, unknown>;
+  if (maxTokens) paramsRecord["max_completion_tokens"] = maxTokens;
+  if (tools?.length) paramsRecord["tools"] = tools;
+  if (toolChoice !== undefined) paramsRecord["tool_choice"] = toolChoice;
+  if (reasoning) paramsRecord["reasoning"] = reasoning;
+  if (imageModalities) paramsRecord["modalities"] = imageModalities;
+  if (providerRouting) paramsRecord["provider"] = providerRouting;
 
   // Image models don't support streaming — always return non-streaming response
   // to avoid base64 content being split across SSE chunks incorrectly
@@ -3157,10 +3332,144 @@ interface GeminiCandidate {
   content?: GeminiContent;
   finishReason?: string;
 }
-interface GeminiUsage { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
+interface GeminiUsage {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  totalTokenCount?: number;
+  cachedContentTokenCount?: number;
+  thoughtsTokenCount?: number;
+}
 interface GeminiResponse {
   candidates?: GeminiCandidate[];
   usageMetadata?: GeminiUsage;
+}
+
+function resolveGeminiAlias(model: string): GeminiModelAlias | undefined {
+  return GEMINI_MODEL_ALIASES[stripVisibleSuffix(model)];
+}
+
+function extractGeminiUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
+  const usageRecord = readRecord(usage);
+  if (!usageRecord) return undefined;
+  const promptTokens = readFiniteNumber(usageRecord.promptTokenCount);
+  const completionTokens = readFiniteNumber(usageRecord.candidatesTokenCount);
+  const totalTokens = readFiniteNumber(usageRecord.totalTokenCount)
+    ?? (promptTokens !== undefined || completionTokens !== undefined
+      ? (promptTokens ?? 0) + (completionTokens ?? 0)
+      : undefined);
+
+  const metrics: ExtendedUsageMetrics = {
+    totalTokens,
+    cachedTokens: readFiniteNumber(usageRecord.cachedContentTokenCount),
+    reasoningTokens: readFiniteNumber(usageRecord.thoughtsTokenCount),
+  };
+
+  if (Object.values(metrics).every((v) => v === undefined)) return undefined;
+  return metrics;
+}
+
+function applyGeminiDefaultThinkingConfig(body: unknown, alias: GeminiModelAlias): Record<string, unknown> {
+  const source = readRecord(body) ?? {};
+  const generationConfig = readRecord(source.generationConfig);
+  if (!alias.thinkingConfig || readRecord(generationConfig?.thinkingConfig)) {
+    return { ...source };
+  }
+  return {
+    ...source,
+    generationConfig: {
+      ...(generationConfig ?? {}),
+      thinkingConfig: alias.thinkingConfig,
+    },
+  };
+}
+
+async function handleGeminiNative({
+  req, res, selectedModel, alias, body, stream, startTime,
+}: {
+  req: Request;
+  res: Response;
+  selectedModel: string;
+  alias: GeminiModelAlias;
+  body: unknown;
+  stream: boolean;
+  startTime: number;
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
+  const { apiKey, baseUrl } = makeLocalGemini();
+  const reqBody = applyGeminiDefaultThinkingConfig(body, alias);
+  const headers = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
+
+  if (!stream) {
+    const url = `${baseUrl}/models/${alias.actualModel}:generateContent`;
+    const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(reqBody) });
+    const text = await upstream.text();
+    if (!upstream.ok) {
+      res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(text);
+      throw new Error(`Gemini native error ${upstream.status}: ${text}`);
+    }
+
+    let data: GeminiResponse;
+    try {
+      data = JSON.parse(text) as GeminiResponse;
+    } catch {
+      data = {};
+    }
+    logResponseDebug(req, "Gemini native response", data);
+    res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(text);
+
+    const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
+    const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
+    return { promptTokens, completionTokens, usage: extractGeminiUsageMetrics(data.usageMetadata) };
+  }
+
+  const url = `${baseUrl}/models/${alias.actualModel}:streamGenerateContent?alt=sse`;
+  const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(reqBody) });
+  if (!upstream.ok || !upstream.body) {
+    const errText = await upstream.text().catch(() => "");
+    res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(errText);
+    throw new Error(`Gemini native stream error ${upstream.status}: ${errText}`);
+  }
+
+  setSseHeaders(res);
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let ttftMs: number | undefined;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let usage: ExtendedUsageMetrics | undefined;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (ttftMs === undefined) ttftMs = Date.now() - startTime;
+      const text = decoder.decode(value, { stream: true });
+      writeAndFlush(res, text);
+      buf += text;
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+        let chunk: GeminiResponse;
+        try { chunk = JSON.parse(raw) as GeminiResponse; } catch { continue; }
+        if (chunk.usageMetadata) {
+          promptTokens = chunk.usageMetadata.promptTokenCount ?? promptTokens;
+          completionTokens = chunk.usageMetadata.candidatesTokenCount ?? completionTokens;
+          usage = extractGeminiUsageMetrics(chunk.usageMetadata) ?? usage;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  res.end();
+  return { promptTokens, completionTokens, ttftMs, usage };
 }
 
 /** Extract answer text and reasoning text from Gemini parts. */
@@ -3171,7 +3480,7 @@ function extractGeminiParts(parts: GeminiPart[]): { answer: string; reasoning: s
 }
 
 async function handleGemini({
-  req, res, model, messages, stream, maxTokens, thinking = false, thinkingVisible = false, startTime,
+  req, res, model, messages, stream, maxTokens, thinkingConfig, startTime,
 }: {
   req: Request;
   res: Response;
@@ -3179,10 +3488,9 @@ async function handleGemini({
   messages: OAIMessage[];
   stream: boolean;
   maxTokens?: number;
-  thinking?: boolean;
-  thinkingVisible?: boolean;
+  thinkingConfig?: Record<string, unknown>;
   startTime: number;
-}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   const { apiKey, baseUrl } = makeLocalGemini();
 
   let systemInstruction: string | undefined;
@@ -3210,12 +3518,7 @@ async function handleGemini({
 
   const generationConfig: Record<string, unknown> = {};
   if (maxTokens) generationConfig.maxOutputTokens = maxTokens;
-  if (thinking) {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384,
-      includeThoughts: true,
-    };
-  }
+  if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
 
   const reqBody: Record<string, unknown> = { contents, generationConfig };
   if (systemInstruction) reqBody.systemInstruction = { parts: [{ text: systemInstruction }] };
@@ -3231,6 +3534,7 @@ async function handleGemini({
     let ttftMs: number | undefined;
     let promptTokens = 0;
     let completionTokens = 0;
+    let usage: ExtendedUsageMetrics | undefined;
     const chatId = `chatcmpl-${Date.now()}`;
 
     try {
@@ -3259,6 +3563,7 @@ async function handleGemini({
           if (chunk.usageMetadata) {
             promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
             completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
+            usage = extractGeminiUsageMetrics(chunk.usageMetadata) ?? usage;
           }
           for (const part of parts) {
             const isThought = !!part.thought;
@@ -3284,7 +3589,7 @@ async function handleGemini({
 
       writeAndFlush(res, "data: [DONE]\n\n");
       res.end();
-      return { promptTokens, completionTokens, ttftMs };
+      return { promptTokens, completionTokens, ttftMs, usage };
     } catch (streamErr) {
       if (res.headersSent) throw streamErr;
       if (!routingSettings.fakeStream) throw streamErr;
@@ -3304,7 +3609,8 @@ async function handleGemini({
         choices: [{ index: 0, message: msg, finish_reason: "stop" }],
         usage: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: pTokens + cTokens },
       };
-      return fakeStreamResponse(res, json as unknown as Record<string, unknown>, startTime);
+      const fakeStats = await fakeStreamResponse(res, json as unknown as Record<string, unknown>, startTime);
+      return { ...fakeStats, usage: extractGeminiUsageMetrics(fallbackJson.usageMetadata) };
     }
   } else {
     const url = `${baseUrl}/models/${model}:generateContent`;
@@ -3328,7 +3634,7 @@ async function handleGemini({
       choices: [{ index: 0, message, finish_reason: "stop" }],
       usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
     });
-    return { promptTokens, completionTokens };
+    return { promptTokens, completionTokens, usage: extractGeminiUsageMetrics(data.usageMetadata) };
   }
 }
 
@@ -3513,7 +3819,7 @@ async function handleClaude({
     // detect the error and transparently upgrade to stream + collect.
     let result: Anthropic.Message;
     try {
-      result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0], requestOptions);
+      result = await client.messages.create(buildCreateParams() as Parameters<typeof client.messages.create>[0], requestOptions) as unknown as Anthropic.Message;
       logResponseDebug(req, "Claude non-stream response", result);
     } catch (nonStreamErr: unknown) {
       const errMsg = nonStreamErr instanceof Error ? nonStreamErr.message : String(nonStreamErr);

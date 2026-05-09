@@ -66,16 +66,14 @@ const ANTHROPIC_MODELS: ModelEntry[] = [
 ];
 
 const GEMINI_MODELS: ModelEntry[] = [
-  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview", provider: "gemini", desc: "最新旗舰多模态模型", context: "2M", badge: "tools" },
-  { id: "gemini-3.1-pro-preview-thinking", label: "Gemini 3.1 Pro Preview (thinking)", provider: "gemini", desc: "扩展思考（隐藏）", context: "2M", badge: "thinking" },
-  { id: "gemini-3.1-pro-preview-thinking-visible", label: "Gemini 3.1 Pro Preview (thinking visible)", provider: "gemini", desc: "扩展思考（可见）", context: "2M", badge: "thinking-visible" },
-  { id: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", provider: "gemini", desc: "极速多模态模型", context: "1M", badge: "tools" },
-  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "gemini", desc: "推理旗舰，强代码能力", context: "1M", badge: "tools" },
-  { id: "gemini-2.5-pro-thinking", label: "Gemini 2.5 Pro (thinking)", provider: "gemini", desc: "扩展思考（隐藏）", context: "1M", badge: "thinking" },
-  { id: "gemini-2.5-pro-thinking-visible", label: "Gemini 2.5 Pro (thinking visible)", provider: "gemini", desc: "扩展思考（可见）", context: "1M", badge: "thinking-visible" },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "gemini", desc: "速度与质量兼备", context: "1M", badge: "tools" },
-  { id: "gemini-2.5-flash-thinking", label: "Gemini 2.5 Flash (thinking)", provider: "gemini", desc: "扩展思考（隐藏）", context: "1M", badge: "thinking" },
-  { id: "gemini-2.5-flash-thinking-visible", label: "Gemini 2.5 Flash (thinking visible)", provider: "gemini", desc: "扩展思考（可见）", context: "1M", badge: "thinking-visible" },
+  { id: "gemini-3.1-pro-preview-low", label: "Gemini 3.1 Pro Preview Low", provider: "gemini", desc: "低思考档位", context: "2M", badge: "thinking" },
+  { id: "gemini-3.1-pro-preview-high", label: "Gemini 3.1 Pro Preview High", provider: "gemini", desc: "高思考档位", context: "2M", badge: "thinking" },
+  { id: "gemini-2.5-pro-nothinking", label: "Gemini 2.5 Pro No Thinking", provider: "gemini", desc: "最低思考预算 128", context: "1M", badge: "tools" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "gemini", desc: "最大思考预算 32768", context: "1M", badge: "thinking" },
+  { id: "gemini-3-flash-preview-nothinking", label: "Gemini 3 Flash Preview No Thinking", provider: "gemini", desc: "minimal 思考档位", context: "1M", badge: "tools" },
+  { id: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", provider: "gemini", desc: "medium 思考档位", context: "1M", badge: "thinking" },
+  { id: "gemini-3-flash-preview-high", label: "Gemini 3 Flash Preview High", provider: "gemini", desc: "high 思考档位", context: "1M", badge: "thinking" },
+  { id: "gemini-3.1-flash-lite-nothinking", label: "Gemini 3.1 Flash Lite No Thinking", provider: "gemini", desc: "低延迟 minimal 档位", context: "1M", badge: "tools" },
 ];
 
 const OPENROUTER_MODELS: ModelEntry[] = [
