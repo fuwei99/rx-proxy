@@ -1899,9 +1899,10 @@ async function handleAnthropicMessagesViaOpenRouter({
     ...rest,
     model: openAIModel,
     messages: anthropicMessagesToOpenAI(system, bridgeMessages),
-    stream: false,
+    stream,
     max_tokens: maxTokens,
   };
+  if (stream) payload.stream_options = { include_usage: true };
   const convertedTools = anthropicToolsToOpenAI(tools);
   if (convertedTools?.length) payload.tools = convertedTools;
   const convertedToolChoice = anthropicToolChoiceToOpenAI(toolChoice);
@@ -1925,6 +1926,151 @@ async function handleAnthropicMessagesViaOpenRouter({
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => "");
     throw new Error(`OpenRouter Anthropic bridge error ${upstream.status}: ${errText}`);
+  }
+
+  if (stream) {
+    if (!upstream.body) throw new Error("OpenRouter Anthropic bridge stream response missing body");
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+
+    const msgId = `msg_${Date.now()}`;
+    writeAndFlush(res, `event: message_start\ndata: ${JSON.stringify({
+      type: "message_start",
+      message: {
+        id: msgId,
+        type: "message",
+        role: "assistant",
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    })}\n\n`);
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let contentIndex = -1;
+    let activeTextIndex: number | null = null;
+    let activeThinkingIndex: number | null = null;
+    const toolIndexes = new Map<number, number>();
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let usageMetrics: ExtendedUsageMetrics | undefined;
+    let stopReason: string | null = null;
+
+    const startBlock = (block: Record<string, unknown>): number => {
+      const index = ++contentIndex;
+      writeAndFlush(res, `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index, content_block: block })}\n\n`);
+      return index;
+    };
+    const stopBlock = (index: number): void => {
+      writeAndFlush(res, `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index })}\n\n`);
+    };
+    const handleChunk = (chunk: Record<string, unknown>): void => {
+      const usage = chunk.usage as Record<string, unknown> | undefined;
+      if (usage) {
+        promptTokens = Number(usage.prompt_tokens) || promptTokens;
+        completionTokens = Number(usage.completion_tokens) || completionTokens;
+        usageMetrics = extractExtendedUsageMetrics(usage) ?? usageMetrics;
+      }
+
+      const choice = (chunk.choices as Record<string, unknown>[] | undefined)?.[0];
+      const delta = choice?.delta as Record<string, unknown> | undefined;
+      if (!delta) return;
+
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (typeof reasoning === "string" && reasoning) {
+        if (activeThinkingIndex === null) {
+          if (activeTextIndex !== null) { stopBlock(activeTextIndex); activeTextIndex = null; }
+          activeThinkingIndex = startBlock({ type: "thinking", thinking: "", signature: "" });
+        }
+        writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: activeThinkingIndex, delta: { type: "thinking_delta", thinking: reasoning } })}\n\n`);
+      }
+
+      const content = delta.content;
+      if (typeof content === "string" && content) {
+        if (activeTextIndex === null) {
+          if (activeThinkingIndex !== null) { stopBlock(activeThinkingIndex); activeThinkingIndex = null; }
+          activeTextIndex = startBlock({ type: "text", text: "" });
+        }
+        writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: activeTextIndex, delta: { type: "text_delta", text: content } })}\n\n`);
+      }
+
+      const toolCalls = delta.tool_calls as Record<string, unknown>[] | undefined;
+      if (Array.isArray(toolCalls)) {
+        if (activeTextIndex !== null) { stopBlock(activeTextIndex); activeTextIndex = null; }
+        if (activeThinkingIndex !== null) { stopBlock(activeThinkingIndex); activeThinkingIndex = null; }
+        for (const tc of toolCalls) {
+          const toolCallIndex = Number(tc.index) || 0;
+          const fn = tc.function as Record<string, unknown> | undefined;
+          let blockIndex = toolIndexes.get(toolCallIndex);
+          if (blockIndex === undefined) {
+            blockIndex = startBlock({
+              type: "tool_use",
+              id: typeof tc.id === "string" ? tc.id : `toolu_${toolCallIndex}`,
+              name: typeof fn?.name === "string" ? fn.name : "tool",
+              input: {},
+            });
+            toolIndexes.set(toolCallIndex, blockIndex);
+          }
+          if (typeof fn?.arguments === "string" && fn.arguments) {
+            writeAndFlush(res, `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "input_json_delta", partial_json: fn.arguments } })}\n\n`);
+          }
+        }
+      }
+
+      if (choice?.finish_reason) {
+        stopReason = mapOpenAIFinishReasonToAnthropic(choice.finish_reason);
+      }
+    };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const raw = trimmed.slice(5).trim();
+          if (!raw || raw === "[DONE]") continue;
+          try { handleChunk(JSON.parse(raw) as Record<string, unknown>); } catch {}
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (activeTextIndex !== null) stopBlock(activeTextIndex);
+    if (activeThinkingIndex !== null) stopBlock(activeThinkingIndex);
+    for (const index of toolIndexes.values()) stopBlock(index);
+
+    const finalUsageMetrics = withEstimatedCostIfMissing(openAIModel, promptTokens, completionTokens, usageMetrics);
+    const dur = Date.now() - startTime;
+    recordCallStat("openrouter", dur, promptTokens, completionTokens, undefined, model, finalUsageMetrics);
+    pushRequestLog({
+      method: req.method, path: req.path, model,
+      backend: "openrouter", status: 200, duration: dur, stream: true,
+      promptTokens,
+      completionTokens,
+      totalTokens: finalUsageMetrics?.totalTokens ?? (promptTokens + completionTokens),
+      costUsd: finalUsageMetrics?.costUsd,
+      cachedTokens: finalUsageMetrics?.cachedTokens,
+      cacheWriteTokens: finalUsageMetrics?.cacheWriteTokens,
+      reasoningTokens: finalUsageMetrics?.reasoningTokens,
+      level: "info",
+    });
+    writeAndFlush(res, `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason ?? "end_turn", stop_sequence: null }, usage: { output_tokens: completionTokens } })}\n\n`);
+    writeAndFlush(res, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    res.end();
+    return;
   }
 
   const result = await upstream.json() as Record<string, unknown>;
