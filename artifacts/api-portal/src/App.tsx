@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type ChangeEvent, type DragEvent } from "react";
 import SetupWizard from "./components/SetupWizard";
 import UpdateBadge from "./components/UpdateBadge";
 import PageLogs from "./components/PageLogs";
@@ -2235,7 +2235,7 @@ function PageEndpoints({ displayUrl, expandedGroups, onToggleGroup, totalModels 
 // PageModels — model enable/disable management
 // ---------------------------------------------------------------------------
 
-interface ModelStatus { id: string; provider: string; enabled: boolean }
+interface ModelStatus { id: string; provider: string; enabled: boolean; description?: string }
 
 type GroupSummary = { total: number; enabled: number };
 
@@ -2276,18 +2276,71 @@ function PageModels({
     openai: true, anthropic: true, gemini: true, openrouter: true,
   });
   const [filter, setFilter] = useState<"all" | "enabled" | "disabled">("all");
+  const [dragActive, setDragActive] = useState(false);
+  const [uploadState, setUploadState] = useState<"idle" | "loading" | "ok" | "err">("idle");
+  const [uploadMsg, setUploadMsg] = useState("");
 
-  const allGroups: { key: string; title: string; models: ModelEntry[]; provider: Provider }[] = [
-    { key: "openai", title: "OpenAI", models: OPENAI_MODELS, provider: "openai" },
-    { key: "anthropic", title: "Anthropic Claude", models: ANTHROPIC_MODELS, provider: "anthropic" },
-    { key: "gemini", title: "Google Gemini", models: GEMINI_MODELS, provider: "gemini" },
-    { key: "openrouter", title: "OpenRouter", models: OPENROUTER_MODELS, provider: "openrouter" },
-  ];
+  const providerTitles: Record<Provider, string> = {
+    openai: "OpenAI",
+    anthropic: "Anthropic Claude",
+    gemini: "Google Gemini",
+    openrouter: "OpenRouter",
+  };
+  const providers: Provider[] = ["openai", "anthropic", "gemini", "openrouter"];
+  const allGroups: { key: string; title: string; models: ModelEntry[]; provider: Provider }[] = providers.map((provider) => ({
+    key: provider,
+    title: providerTitles[provider],
+    provider,
+    models: modelStatus
+      .filter((m) => m.provider === provider)
+      .map((m) => ({
+        id: m.id,
+        label: m.id,
+        provider,
+        desc: m.description ?? "",
+        badge: m.id.includes("image") ? "image" : m.id.includes("thinking") ? "thinking" : undefined,
+      })),
+  }));
 
   const statusMap = new Map(modelStatus.map((m) => [m.id, m.enabled]));
 
   const totalEnabled = modelStatus.filter((m) => m.enabled).length;
   const totalCount = modelStatus.length;
+
+  const uploadRegistryFile = async (file: File) => {
+    setUploadState("loading");
+    setUploadMsg("");
+    try {
+      if (!file.name.toLowerCase().endsWith(".json")) throw new Error("Please upload a JSON file.");
+      const content = await file.text();
+      const r = await fetch(`${baseUrl}/api/v1/admin/model-registry/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error ?? "Upload failed");
+      setUploadState("ok");
+      setUploadMsg(`Saved ${d.modelFamilies ?? "?"} families / ${d.exposedModels ?? "?"} exposed models.`);
+      onRefresh();
+    } catch (err) {
+      setUploadState("err");
+      setUploadMsg(err instanceof Error ? err.message : "Upload failed");
+    }
+  };
+
+  const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) void uploadRegistryFile(file);
+    event.target.value = "";
+  };
+
+  const handleDrop = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    const file = event.dataTransfer.files?.[0];
+    if (file) void uploadRegistryFile(file);
+  };
 
   if (!apiKey) {
     return (
@@ -2332,6 +2385,45 @@ function PageModels({
       </Card>
 
       {/* 各组 */}
+      <Card style={{ marginBottom: "16px" }}>
+        <SectionTitle>models.json</SectionTitle>
+        <label
+          onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={handleDrop}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: "14px",
+            minHeight: "86px", padding: "16px", borderRadius: "8px",
+            border: `1px dashed ${dragActive ? "rgba(129,140,248,0.8)" : "rgba(148,163,184,0.28)"}`,
+            background: dragActive ? "rgba(99,102,241,0.12)" : "rgba(15,23,42,0.35)",
+            cursor: "pointer",
+          }}
+        >
+          <input type="file" accept="application/json,.json" onChange={handleFileInput} style={{ display: "none" }} />
+          <div>
+            <div style={{ fontSize: "13px", color: "#cbd5e1", fontWeight: 700 }}>Drop models.json here or click to upload</div>
+            <div style={{ fontSize: "12px", color: "#64748b", marginTop: "6px" }}>
+              The server validates JSON, replaces the workspace models.json, and reloads the registry immediately.
+            </div>
+          </div>
+          <div style={{
+            padding: "7px 12px", borderRadius: "6px", border: "1px solid rgba(129,140,248,0.35)",
+            color: uploadState === "loading" ? "#94a3b8" : "#a5b4fc", background: "rgba(99,102,241,0.1)",
+            fontSize: "12px", fontWeight: 700, flexShrink: 0,
+          }}>
+            {uploadState === "loading" ? "Uploading..." : "Upload"}
+          </div>
+        </label>
+        {uploadMsg && (
+          <div style={{
+            marginTop: "10px", fontSize: "12px",
+            color: uploadState === "err" ? "#f87171" : "#4ade80",
+          }}>
+            {uploadMsg}
+          </div>
+        )}
+      </Card>
+
       {allGroups.map(({ key, title, models, provider }) => {
         const c = PROVIDER_COLORS[provider];
         const grpSummary = summary[key] ?? { total: models.length, enabled: models.length };

@@ -1,0 +1,846 @@
+{
+  "version": "2.0",
+  "compatibility": {
+    "strip_visible_suffixes": true,
+    "legacy_visible_suffixes": [
+      "-thinking-visible",
+      "-low-thinking-visible",
+      "-high-thinking-visible"
+    ]
+  },
+  "models": [
+    {
+      "model": "gpt-5.2",
+      "provider": "openai",
+      "actual_model": "gpt-5.2",
+      "description": "OpenAI model"
+    },
+    {
+      "model": "gpt-5.1",
+      "provider": "openai",
+      "actual_model": "gpt-5.1",
+      "description": "OpenAI model"
+    },
+    {
+      "model": "gpt-5",
+      "provider": "openai",
+      "actual_model": "gpt-5",
+      "description": "OpenAI model"
+    },
+    {
+      "model": "gpt-5-mini",
+      "provider": "openai",
+      "actual_model": "gpt-5-mini",
+      "description": "OpenAI model"
+    },
+    {
+      "model": "gpt-5-nano",
+      "provider": "openai",
+      "actual_model": "gpt-5-nano",
+      "description": "OpenAI model"
+    },
+    {
+      "model": "claude-opus-4-7",
+      "provider": "anthropic",
+      "actual_model": "claude-opus-4-7",
+      "description": "Anthropic Claude model",
+      "max_tokens": 128000,
+      "features": ["no_prefill"],
+      "pricing": [{ "min_tokens": 0, "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5 }],
+      "aliases": [
+        { "id": "claude-opus-4-7" },
+        {
+          "id": "claude-opus-4-7-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "adaptive" },
+              "output_config": { "effort": "xhigh" }
+            }
+          }
+        },
+        {
+          "id": "claude-opus-4-7-300k-thinking",
+          "description": "Extended thinking with 300k output beta",
+          "max_tokens": 300000,
+          "features": ["visible_reasoning", "output_300k_beta"],
+          "headers": { "anthropic-beta": "output-300k-2026-03-24" },
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "effort": "max" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-opus-4-6",
+      "provider": "anthropic",
+      "actual_model": "claude-opus-4-6",
+      "description": "Anthropic Claude model",
+      "max_tokens": 128000,
+      "features": ["no_prefill"],
+      "pricing": [{ "min_tokens": 0, "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5 }],
+      "aliases": [
+        { "id": "claude-opus-4-6" },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "adaptive" },
+              "output_config": { "effort": "xhigh" }
+            }
+          }
+        },
+        {
+          "id": "claude-opus-4-6-300k-thinking",
+          "description": "Extended thinking with 300k output beta",
+          "max_tokens": 300000,
+          "features": ["visible_reasoning", "output_300k_beta"],
+          "headers": { "anthropic-beta": "output-300k-2026-03-24" },
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "effort": "max" }
+            }
+          }
+        },
+        {
+          "id": "claude-opus-4-6-search",
+          "description": "Anthropic Claude with built-in web search",
+          "features": ["web_search"],
+          "defaults": {
+            "anthropic": {
+              "tools": [{ "type": "web_search_20250305", "name": "web_search" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-opus-4-5",
+      "provider": "anthropic",
+      "actual_model": "claude-opus-4-5",
+      "description": "Anthropic Claude model",
+      "max_tokens": 64000,
+      "pricing": [{ "min_tokens": 0, "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5 }],
+      "aliases": [
+        { "id": "claude-opus-4-5" },
+        {
+          "id": "claude-opus-4-5-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-opus-4-1",
+      "provider": "anthropic",
+      "actual_model": "claude-opus-4-1",
+      "description": "Anthropic Claude model",
+      "max_tokens": 64000,
+      "pricing": [{ "min_tokens": 0, "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5 }],
+      "aliases": [
+        { "id": "claude-opus-4-1" },
+        {
+          "id": "claude-opus-4-1-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "actual_model": "claude-sonnet-4-6",
+      "description": "Anthropic Claude model",
+      "max_tokens": 128000,
+      "features": ["no_prefill"],
+      "pricing": [{ "min_tokens": 0, "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3 }],
+      "aliases": [
+        { "id": "claude-sonnet-4-6" },
+        {
+          "id": "claude-sonnet-4-6-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "adaptive" },
+              "output_config": { "effort": "xhigh" }
+            }
+          }
+        },
+        {
+          "id": "claude-sonnet-4-6-300k-thinking",
+          "description": "Extended thinking with 300k output beta",
+          "max_tokens": 300000,
+          "features": ["visible_reasoning", "output_300k_beta"],
+          "headers": { "anthropic-beta": "output-300k-2026-03-24" },
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "effort": "max" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "actual_model": "claude-sonnet-4-5",
+      "description": "Anthropic Claude model",
+      "max_tokens": 64000,
+      "pricing": [{ "min_tokens": 0, "input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3 }],
+      "aliases": [
+        { "id": "claude-sonnet-4-5" },
+        {
+          "id": "claude-sonnet-4-5-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "actual_model": "claude-haiku-4-5",
+      "description": "Anthropic Claude model",
+      "max_tokens": 8096,
+      "pricing": [{ "min_tokens": 0, "input": 1.0, "output": 5.0, "cache_write": 1.25, "cache_read": 0.1 }],
+      "aliases": [
+        { "id": "claude-haiku-4-5" },
+        {
+          "id": "claude-haiku-4-5-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "model": "gemini-3.1-pro-preview",
+      "provider": "gemini",
+      "actual_model": "gemini-3.1-pro-preview",
+      "pricing": [
+        { "min_tokens": 0, "input": 2.0, "output": 12.0, "cache_read": 0.2 },
+        { "min_tokens": 200000, "input": 4.0, "output": 18.0, "cache_read": 0.4 }
+      ],
+      "aliases": [
+        {
+          "id": "gemini-3.1-pro-preview-low",
+          "description": "Gemini 3.1 Pro Preview, low thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingLevel": "low", "includeThoughts": true }
+            }
+          }
+        },
+        {
+          "id": "gemini-3.1-pro-preview-high",
+          "description": "Gemini 3.1 Pro Preview, high thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingLevel": "high", "includeThoughts": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "gemini-2.5-pro",
+      "provider": "gemini",
+      "actual_model": "gemini-2.5-pro",
+      "pricing": [
+        { "min_tokens": 0, "input": 1.25, "output": 10.0, "cache_read": 0.125 },
+        { "min_tokens": 200000, "input": 2.5, "output": 15.0, "cache_read": 0.25 }
+      ],
+      "aliases": [
+        {
+          "id": "gemini-2.5-pro-nothinking",
+          "description": "Gemini 2.5 Pro, minimum thinking budget",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingBudget": 128, "includeThoughts": true }
+            }
+          }
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "description": "Gemini 2.5 Pro, maximum thinking budget",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingBudget": 32768, "includeThoughts": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "gemini-3-flash-preview",
+      "provider": "gemini",
+      "actual_model": "gemini-3-flash-preview",
+      "pricing": [{ "min_tokens": 0, "input": 0.5, "output": 3.0, "cache_read": 0.05 }],
+      "aliases": [
+        {
+          "id": "gemini-3-flash-preview-nothinking",
+          "description": "Gemini 3 Flash Preview, minimal thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingLevel": "minimal", "includeThoughts": true }
+            }
+          }
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "description": "Gemini 3 Flash Preview, medium thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingLevel": "medium", "includeThoughts": true }
+            }
+          }
+        },
+        {
+          "id": "gemini-3-flash-preview-high",
+          "description": "Gemini 3 Flash Preview, high thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "gemini": {
+              "thinkingConfig": { "thinkingLevel": "high", "includeThoughts": true }
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "model": "x-ai/grok-4.20",
+      "provider": "openrouter",
+      "actual_model": "x-ai/grok-4.20"
+    },
+    {
+      "model": "x-ai/grok-4.1-fast",
+      "provider": "openrouter",
+      "actual_model": "x-ai/grok-4.1-fast"
+    },
+    {
+      "model": "x-ai/grok-4-fast",
+      "provider": "openrouter",
+      "actual_model": "x-ai/grok-4-fast"
+    },
+    {
+      "model": "meta-llama/llama-4-maverick",
+      "provider": "openrouter",
+      "actual_model": "meta-llama/llama-4-maverick"
+    },
+    {
+      "model": "meta-llama/llama-4-scout",
+      "provider": "openrouter",
+      "actual_model": "meta-llama/llama-4-scout"
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "provider": "openrouter",
+      "actual_model": "deepseek/deepseek-v4-flash",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "deepseek/deepseek-v4-flash" },
+        {
+          "id": "deepseek/deepseek-v4-flash-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "deepseek/deepseek-v4-pro",
+      "provider": "openrouter",
+      "actual_model": "deepseek/deepseek-v4-pro",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "deepseek/deepseek-v4-pro" },
+        {
+          "id": "deepseek/deepseek-v4-pro-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "provider": "openrouter",
+      "actual_model": "deepseek/deepseek-v3.2"
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "provider": "openrouter",
+      "actual_model": "deepseek/deepseek-r1"
+    },
+    {
+      "model": "deepseek/deepseek-r1-0528",
+      "provider": "openrouter",
+      "actual_model": "deepseek/deepseek-r1-0528"
+    },
+    {
+      "model": "mistralai/mistral-small-2603",
+      "provider": "openrouter",
+      "actual_model": "mistralai/mistral-small-2603"
+    },
+    {
+      "model": "qwen/qwen3.5-122b-a10b",
+      "provider": "openrouter",
+      "actual_model": "qwen/qwen3.5-122b-a10b"
+    },
+    {
+      "model": "google/gemini-2.5-pro",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-2.5-pro"
+    },
+    {
+      "model": "anthropic/claude-opus-4.7",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.7",
+      "features": ["cache_control", "anthropic_messages_bridge"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true },
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "openrouter": {
+        "verbosity_effort_map": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "aliases": [
+        { "id": "anthropic/claude-opus-4.7" },
+        {
+          "id": "anthropic/claude-opus-4.7-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "anthropic/claude-opus-4.7-fast",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.7-fast",
+      "features": ["cache_control"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true }
+        }
+      }
+    },
+    {
+      "model": "anthropic/claude-opus-4.6",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.6",
+      "features": ["cache_control", "anthropic_messages_bridge"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true },
+          "reasoning": { "effort": "none" },
+          "params": { "temperature": 1, "top_p": 1 }
+        }
+      },
+      "openrouter": {
+        "verbosity_effort_map": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "max",
+          "max": "max"
+        }
+      },
+      "aliases": [
+        { "id": "anthropic/claude-opus-4.6" },
+        {
+          "id": "anthropic/claude-opus-4.6-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "anthropic/claude-opus-4.6:online",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.6:online",
+      "features": ["cache_control"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true }
+        }
+      }
+    },
+    {
+      "model": "anthropic/claude-opus-4.6-fast",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.6-fast",
+      "features": ["cache_control"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true },
+          "params": { "temperature": 1, "top_p": 1 }
+        }
+      }
+    },
+    {
+      "model": "anthropic/claude-opus-4.5",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.5",
+      "exposed": false,
+      "features": ["cache_control", "anthropic_messages_bridge"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true },
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "openrouter": {
+        "verbosity_effort_map": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "high",
+          "max": "high"
+        }
+      }
+    },
+    {
+      "model": "cohere/command-a",
+      "provider": "openrouter",
+      "actual_model": "cohere/command-a"
+    },
+    {
+      "model": "amazon/nova-premier-v1",
+      "provider": "openrouter",
+      "actual_model": "amazon/nova-premier-v1"
+    },
+    {
+      "model": "baidu/ernie-4.5-300b-a47b",
+      "provider": "openrouter",
+      "actual_model": "baidu/ernie-4.5-300b-a47b",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "baidu/ernie-4.5-300b-a47b" },
+        {
+          "id": "baidu/ernie-4.5-300b-a47b-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "z-ai/glm-5.1",
+      "provider": "openrouter",
+      "actual_model": "z-ai/glm-5.1",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "z-ai/glm-5.1" },
+        {
+          "id": "z-ai/glm-5.1-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen/qwen3.6-plus",
+      "provider": "openrouter",
+      "actual_model": "qwen/qwen3.6-plus",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "qwen/qwen3.6-plus" },
+        {
+          "id": "qwen/qwen3.6-plus-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen/qwen3.6-max-preview",
+      "provider": "openrouter",
+      "actual_model": "qwen/qwen3.6-max-preview",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "qwen/qwen3.6-max-preview" },
+        {
+          "id": "qwen/qwen3.6-max-preview-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "minimax/minimax-m2.7",
+      "provider": "openrouter",
+      "actual_model": "minimax/minimax-m2.7",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "minimax/minimax-m2.7" },
+        {
+          "id": "minimax/minimax-m2.7-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "provider": "openrouter",
+      "actual_model": "moonshotai/kimi-k2.6",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "moonshotai/kimi-k2.6" },
+        {
+          "id": "moonshotai/kimi-k2.6-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "xiaomi/mimo-v2.5-pro",
+      "provider": "openrouter",
+      "actual_model": "xiaomi/mimo-v2.5-pro",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "xiaomi/mimo-v2.5-pro" },
+        {
+          "id": "xiaomi/mimo-v2.5-pro-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "openai/gpt-5.5-pro",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.5-pro"
+    },
+    {
+      "model": "openai/gpt-5.5",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.5"
+    },
+    {
+      "model": "openai/gpt-5.4",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.4"
+    },
+    {
+      "model": "openai/gpt-5.4-pro",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.4-pro"
+    },
+    {
+      "model": "openai/gpt-5.4-mini",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.4-mini"
+    },
+    {
+      "model": "openai/gpt-5.4-nano",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.4-nano"
+    },
+    {
+      "model": "openai/gpt-5.4-image-2",
+      "provider": "openrouter",
+      "actual_model": "openai/gpt-5.4-image-2",
+      "features": ["image_text", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image", "text"]
+        }
+      }
+    },
+    {
+      "model": "google/gemini-3.1-flash-image-preview",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-3.1-flash-image-preview",
+      "features": ["image_text", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image", "text"]
+        }
+      }
+    },
+    {
+      "model": "google/gemini-3-pro-image-preview",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-3-pro-image-preview",
+      "features": ["image_text", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image", "text"]
+        }
+      }
+    },
+    {
+      "model": "google/gemini-2.5-flash-image",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-2.5-flash-image",
+      "features": ["image_text", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image", "text"]
+        }
+      }
+    },
+    {
+      "model": "bytedance-seed/seedream-4.5",
+      "provider": "openrouter",
+      "actual_model": "bytedance-seed/seedream-4.5",
+      "features": ["image_only", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image"]
+        }
+      }
+    },
+    {
+      "model": "google/gemini-3.1-pro-preview",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-3.1-pro-preview",
+      "aliases": [
+        {
+          "id": "google/gemini-3.1-pro-preview-low",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "google/gemini-3.1-pro-preview-high",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "high" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "google/gemini-3.5-flash",
+      "provider": "openrouter",
+      "actual_model": "google/gemini-3.5-flash",
+      "pricing": [{ "min_tokens": 0, "input": 0.075, "output": 0.3 }]
+    }
+  ]
+}

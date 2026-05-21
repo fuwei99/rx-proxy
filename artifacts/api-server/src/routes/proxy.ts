@@ -3,163 +3,27 @@ import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { readJson, writeJson } from "../lib/cloudPersist";
 import { getSillyTavernMode } from "./settings";
+import {
+  ALL_MODELS,
+  GEMINI_MODELS,
+  MODEL_PROVIDER_MAP,
+  getAnthropicDefaults,
+  getGeminiAlias,
+  getOpenRouterModalities,
+  getOpenRouterParams,
+  getOpenRouterProviderRouting,
+  getOpenRouterReasoning,
+  getPricing,
+  readModelsJsonText,
+  refreshModelRegistryIfChanged,
+  replaceModelsJson,
+  modelHasFeature,
+  resolveModel,
+  type ModelProvider,
+  type GeminiModelAlias,
+} from "../lib/modelRegistry";
 
 const router: IRouter = Router();
-
-// ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
-
-const OPENAI_CHAT_MODELS = [
-  "gpt-5.2", "gpt-5.1", "gpt-5", "gpt-5-mini", "gpt-5-nano",
-  "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
-  "gpt-4o", "gpt-4o-mini",
-  "o4-mini", "o3", "o3-mini",
-];
-const OPENAI_THINKING_ALIASES = OPENAI_CHAT_MODELS
-  .filter((m) => m.startsWith("o"))
-  .map((m) => `${m}-thinking`);
-
-const ANTHROPIC_BASE_MODELS = [
-  "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1",
-  "claude-sonnet-4-6", "claude-sonnet-4-5",
-  "claude-haiku-4-5",
-];
-
-// Models with Anthropic built-in web search injected automatically
-const ANTHROPIC_SEARCH_MODELS = [
-  "claude-opus-4-6-search",
-];
-
-// Models that support 300k output via beta header (opus/sonnet 4.6+)
-const ANTHROPIC_300K_BASE_MODELS = [
-  "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
-];
-
-type GeminiModelAlias = {
-  actualModel: string;
-  thinkingConfig?: Record<string, unknown>;
-  description: string;
-};
-
-const GEMINI_MODEL_ALIASES: Record<string, GeminiModelAlias> = {
-  "gemini-3.1-pro-preview-low": {
-    actualModel: "gemini-3.1-pro-preview",
-    thinkingConfig: { thinkingLevel: "low", includeThoughts: true },
-    description: "Gemini 3.1 Pro Preview, low thinking",
-  },
-  "gemini-3.1-pro-preview-high": {
-    actualModel: "gemini-3.1-pro-preview",
-    thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
-    description: "Gemini 3.1 Pro Preview, high thinking",
-  },
-  "gemini-2.5-pro-nothinking": {
-    actualModel: "gemini-2.5-pro",
-    thinkingConfig: { thinkingBudget: 128, includeThoughts: true },
-    description: "Gemini 2.5 Pro, minimum thinking budget",
-  },
-  "gemini-2.5-pro": {
-    actualModel: "gemini-2.5-pro",
-    thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
-    description: "Gemini 2.5 Pro, maximum thinking budget",
-  },
-  "gemini-3-flash-preview-nothinking": {
-    actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "minimal", includeThoughts: true },
-    description: "Gemini 3 Flash Preview, minimal thinking",
-  },
-  "gemini-3-flash-preview": {
-    actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "medium", includeThoughts: true },
-    description: "Gemini 3 Flash Preview, medium thinking",
-  },
-  "gemini-3-flash-preview-high": {
-    actualModel: "gemini-3-flash-preview",
-    thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
-    description: "Gemini 3 Flash Preview, high thinking",
-  },
-};
-const GEMINI_MODELS = Object.entries(GEMINI_MODEL_ALIASES).map(([id, meta]) => ({ id, description: meta.description }));
-
-const OPENROUTER_FEATURED = [
-  "x-ai/grok-4.20", "x-ai/grok-4.1-fast", "x-ai/grok-4-fast",
-  "meta-llama/llama-4-maverick", "meta-llama/llama-4-scout",
-  "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
-  "deepseek/deepseek-v3.2", "deepseek/deepseek-r1", "deepseek/deepseek-r1-0528",
-  "mistralai/mistral-small-2603", "qwen/qwen3.5-122b-a10b",
-  "google/gemini-2.5-pro", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.6:online", "anthropic/claude-opus-4.6-fast",
-  "anthropic/claude-opus-4.7", "anthropic/claude-opus-4.7-fast",
-  "cohere/command-a", "amazon/nova-premier-v1", "baidu/ernie-4.5-300b-a47b",
-  "z-ai/glm-5.1", "qwen/qwen3.6-plus", "qwen/qwen3.6-max-preview", "minimax/minimax-m2.7", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro",
-  "openai/gpt-5.5-pro", "openai/gpt-5.5",
-  "openai/gpt-5.4", "openai/gpt-5.4-pro", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano",
-  "openai/gpt-5.4-image-2",
-  "google/gemini-3.1-flash-image-preview", "google/gemini-3-pro-image-preview", "google/gemini-2.5-flash-image",
-  "bytedance-seed/seedream-4.5",
-];
-
-// OpenRouter models that support reasoning via { reasoning: { enabled: true } }
-const OPENROUTER_THINKING_BASE = [
-  "anthropic/claude-opus-4.6",
-  "anthropic/claude-opus-4.7",
-  "minimax/minimax-m2.7",
-  "z-ai/glm-5.1",
-  "moonshotai/kimi-k2.6",
-  "xiaomi/mimo-v2.5-pro",
-];
-const OPENROUTER_THINKING_MODELS: string[] = OPENROUTER_THINKING_BASE.map((id) => `${id}-thinking`);
-
-// OpenRouter models with effort-based reasoning (always-on, no plain variant).
-// Exposed as <base>-low / <base>-high (always visible)
-const OPENROUTER_EFFORT_BASE = [
-  "google/gemini-3.1-pro-preview",
-];
-// Base (plain) variants of these models default to thinking if reasoning is omitted;
-// must explicitly send effort:"none" to disable it.
-const OPENROUTER_EFFORT_NONE_SET = new Set([
-  "anthropic/claude-opus-4.7", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.5",
-  "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash",
-  "minimax/minimax-m2.7", "z-ai/glm-5.1", "moonshotai/kimi-k2.6", "xiaomi/mimo-v2.5-pro",
-]);
-
-// Image models that return images alongside text — inject modalities:["image","text"]
-const OPENROUTER_IMAGE_TEXT_MODELS = new Set([
-  "openai/gpt-5.4-image-2",
-  "google/gemini-3.1-flash-image-preview", "google/gemini-3-pro-image-preview", "google/gemini-2.5-flash-image",
-]);
-// Image-only models (no text output) — inject modalities:["image"]
-const OPENROUTER_IMAGE_ONLY_MODELS = new Set([
-  "bytedance-seed/seedream-4.5",
-]);
-// Union for response normalization (message.images[] → message.content[])
-const OPENROUTER_IMAGE_MODELS = new Set([...OPENROUTER_IMAGE_TEXT_MODELS, ...OPENROUTER_IMAGE_ONLY_MODELS]);
-const OPENROUTER_EFFORT_MODELS: string[] = OPENROUTER_EFFORT_BASE.flatMap((id) => [
-  `${id}-low`,
-  `${id}-high`,
-]);
-
-const OPENAI_MODELS = OPENAI_CHAT_MODELS.map((id) => ({ id, description: "OpenAI model" }));
-const CLAUDE_MODELS = [
-  ...ANTHROPIC_BASE_MODELS.flatMap((id) => [
-    { id, description: "Anthropic Claude model" },
-    { id: `${id}-thinking`, description: "Extended thinking" },
-  ]),
-  ...ANTHROPIC_SEARCH_MODELS.map((id) => ({ id, description: "Anthropic Claude with built-in web search" })),
-];
-
-const ALL_MODELS = [
-  ...OPENAI_CHAT_MODELS.map((id) => ({ id })),
-  ...OPENAI_THINKING_ALIASES.map((id) => ({ id })),
-  ...ANTHROPIC_BASE_MODELS.flatMap((id) => [
-    { id },
-    { id: `${id}-thinking` },
-  ]),
-  ...ANTHROPIC_SEARCH_MODELS.map((id) => ({ id })),
-  ...GEMINI_MODELS.map((m) => ({ id: m.id, description: m.description })),
-  ...OPENROUTER_FEATURED.map((id) => ({ id })),
-  ...OPENROUTER_THINKING_MODELS.map((id) => ({ id })),
-  ...OPENROUTER_EFFORT_MODELS.map((id) => ({ id })),
-];
 
 // ---------------------------------------------------------------------------
 // Backend pool — round-robin across local account + multiple friend proxies
@@ -190,28 +54,8 @@ function saveDynamicBackends(list: DynamicBackend[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// Model provider map + enable/disable management
+// Model enable/disable management
 // ---------------------------------------------------------------------------
-
-type ModelProvider = "openai" | "anthropic" | "gemini" | "openrouter";
-
-// Build a complete id → provider lookup from the model constants above
-const MODEL_PROVIDER_MAP = new Map<string, ModelProvider>();
-
-for (const id of OPENAI_CHAT_MODELS) { MODEL_PROVIDER_MAP.set(id, "openai"); }
-for (const id of OPENAI_THINKING_ALIASES) { MODEL_PROVIDER_MAP.set(id, "openai"); }
-for (const base of ANTHROPIC_BASE_MODELS) {
-  MODEL_PROVIDER_MAP.set(base, "anthropic");
-  MODEL_PROVIDER_MAP.set(`${base}-thinking`, "anthropic");
-}
-for (const id of ANTHROPIC_SEARCH_MODELS) { MODEL_PROVIDER_MAP.set(id, "anthropic"); }
-for (const base of ANTHROPIC_300K_BASE_MODELS) {
-  MODEL_PROVIDER_MAP.set(`${base}-300k-thinking`, "anthropic");
-}
-for (const { id } of GEMINI_MODELS) { MODEL_PROVIDER_MAP.set(id, "gemini"); }
-for (const id of OPENROUTER_FEATURED) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
-for (const id of OPENROUTER_THINKING_MODELS) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
-for (const id of OPENROUTER_EFFORT_MODELS) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
 
 // Strip legacy -visible suffix for backward compatibility.
 // -low-thinking-visible / -high-thinking-visible → -low / -high
@@ -661,64 +505,36 @@ function extractExtendedUsageMetrics(usage: unknown): ExtendedUsageMetrics | und
 }
 
 type ClaudeCostRates = { inputPerMTok: number; outputPerMTok: number; cacheWritePerMTok: number; cacheReadPerMTok: number };
-const CLAUDE_OPUS_45_47_RATES: ClaudeCostRates = {
-  inputPerMTok: 5,
-  outputPerMTok: 25,
-  cacheWritePerMTok: 6.25,
-  cacheReadPerMTok: 0.5,
-};
-const CLAUDE_SONNET_45_46_RATES: ClaudeCostRates = {
-  inputPerMTok: 3,
-  outputPerMTok: 15,
-  cacheWritePerMTok: 3.75,
-  cacheReadPerMTok: 0.3,
-};
-const CLAUDE_HAIKU_45_RATES: ClaudeCostRates = {
-  inputPerMTok: 1,
-  outputPerMTok: 5,
-  cacheWritePerMTok: 1.25,
-  cacheReadPerMTok: 0.1,
-};
-
 type GeminiCostRates = { inputPerMTok: number; outputPerMTok: number; cacheReadPerMTok: number };
 
-function getGeminiCostRates(model: string | undefined, promptTokens: number): GeminiCostRates | undefined {
-  if (!model) return undefined;
-  const normalized = model.toLowerCase();
-  const over200k = promptTokens > 200_000;
-
-  if (normalized.startsWith("gemini-3.1-pro-preview")) {
-    return over200k
-      ? { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4 }
-      : { inputPerMTok: 2, outputPerMTok: 12, cacheReadPerMTok: 0.2 };
-  }
-
-  if (normalized.startsWith("gemini-3-flash-preview")) {
-    return { inputPerMTok: 0.5, outputPerMTok: 3, cacheReadPerMTok: 0.05 };
-  }
-
-  if (normalized.startsWith("gemini-2.5-pro")) {
-    return over200k
-      ? { inputPerMTok: 2.5, outputPerMTok: 15, cacheReadPerMTok: 0.25 }
-      : { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125 };
-  }
-
-  return undefined;
+function selectPricingTier(model: string | undefined, promptTokens: number) {
+  const tiers = getPricing(model);
+  if (!tiers?.length) return undefined;
+  return [...tiers]
+    .sort((a, b) => a.min_tokens - b.min_tokens)
+    .filter((tier) => promptTokens >= tier.min_tokens)
+    .at(-1);
 }
 
-function getClaudeFallbackCostRates(model?: string): ClaudeCostRates | undefined {
-  if (!model) return undefined;
-  const normalized = model.toLowerCase().replace(/^anthropic\//, "").replace(/\./g, "-");
-  if (/^claude-opus-4-(5|6|7)(-|$)/.test(normalized)) {
-    return CLAUDE_OPUS_45_47_RATES;
-  }
-  if (/^claude-sonnet-4-(5|6)(-|$)/.test(normalized)) {
-    return CLAUDE_SONNET_45_46_RATES;
-  }
-  if (/^claude-haiku-4-5(-|$)/.test(normalized)) {
-    return CLAUDE_HAIKU_45_RATES;
-  }
-  return undefined;
+function getGeminiCostRates(model: string | undefined, promptTokens: number): GeminiCostRates | undefined {
+  const tier = selectPricingTier(model, promptTokens);
+  if (!tier || tier.input === undefined || tier.output === undefined) return undefined;
+  return {
+    inputPerMTok: tier.input,
+    outputPerMTok: tier.output,
+    cacheReadPerMTok: tier.cache_read ?? 0,
+  };
+}
+
+function getClaudeFallbackCostRates(model: string | undefined, promptTokens: number): ClaudeCostRates | undefined {
+  const tier = selectPricingTier(model, promptTokens);
+  if (!tier || tier.input === undefined || tier.output === undefined) return undefined;
+  return {
+    inputPerMTok: tier.input,
+    outputPerMTok: tier.output,
+    cacheWritePerMTok: tier.cache_write ?? 0,
+    cacheReadPerMTok: tier.cache_read ?? 0,
+  };
 }
 
 function withEstimatedCostIfMissing(
@@ -748,7 +564,7 @@ function withEstimatedCostIfMissing(
     };
   }
 
-  const rates = getClaudeFallbackCostRates(model);
+  const rates = getClaudeFallbackCostRates(model, promptTokens);
   if (!rates) return usage;
 
   const cachedTokens = usage?.cachedTokens ?? 0;
@@ -916,6 +732,7 @@ function requireApiKeyWithQuery(req: Request, res: Response, next: () => void) {
 // ---------------------------------------------------------------------------
 
 router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
+  refreshModelRegistryIfChanged();
   const pool = buildBackendPool();
   const friendStatuses = getFriendProxyConfigs().map(({ label, url }) => ({
     label,
@@ -944,6 +761,7 @@ router.get("/v1/models", requireApiKey, (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 router.get("/v1beta/models", requireApiKeyWithQuery, (_req: Request, res: Response) => {
+  refreshModelRegistryIfChanged();
   res.json({
     models: GEMINI_MODELS
       .filter((m) => isModelEnabled(m.id))
@@ -1167,12 +985,18 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     return;
   }
 
+  const resolved = resolveModel(selectedModel);
+  if (!resolved) {
+    res.status(404).json({ error: { message: `Unknown model '${selectedModel}'`, type: "invalid_request_error", code: "model_not_found" } });
+    return;
+  }
+
   // Reject disabled models early
   if (!isModelEnabled(selectedModel)) {
     res.status(403).json({ error: { message: `Model '${selectedModel}' is disabled on this gateway`, type: "invalid_request_error", code: "model_disabled" } });
     return;
   }
-  const provider = MODEL_PROVIDER_MAP.get(selectedModel) ?? "openai";
+  const provider = resolved.provider;
   const isClaudeModel = provider === "anthropic";
   const isGeminiModel = provider === "gemini";
   const isOpenRouterModel = provider === "openrouter";
@@ -1200,26 +1024,33 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         triedFriendUrls.add(backend.url);
         result = await handleFriendProxy({ req, res, backend, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
       } else if (isClaudeModel) {
-        const webSearch = selectedModel.endsWith("-search");
-        const stripped = webSearch ? selectedModel.replace(/-search$/, "") : selectedModel;
-        const is300k = stripped.includes("-300k");
-        const strippedOf300k = is300k ? stripped.replace("-300k", "") : stripped;
-        const thinkingEnabled = strippedOf300k.endsWith("-thinking");
-        const resolvedModel = thinkingEnabled ? strippedOf300k.replace(/-thinking$/, "") : strippedOf300k;
-        const CLAUDE_MODEL_MAX: Record<string, number> = {
-          "claude-haiku-4-5": 8096,
-          "claude-sonnet-4-5": 64000,
-          "claude-sonnet-4-6": 128000,
-          "claude-opus-4-1": 64000,
-          "claude-opus-4-5": 64000,
-          "claude-opus-4-6": 128000,
-          "claude-opus-4-7": 128000,
-        };
-        const modelMax = is300k ? 300000 : (CLAUDE_MODEL_MAX[resolvedModel] ?? 32000);
+        const webSearch = modelHasFeature(resolved, "web_search");
+        const thinkingEnabled = modelHasFeature(resolved, "visible_reasoning");
+        const modelMax = resolved.maxTokens ?? 32000;
         const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
         const client = makeLocalAnthropic();
         const cacheControl = cache_control ?? { type: "ephemeral" };
-        result = await handleClaude({ req, res, client, model: resolvedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, temperature, topP: top_p, thinking: thinkingEnabled, thinkingVisible: thinkingEnabled, tools, toolChoice: tool_choice, webSearch, use300k: is300k, cacheControl, startTime });
+        result = await handleClaude({
+          req,
+          res,
+          client,
+          model: resolved.actualModel,
+          messages: finalMessages,
+          stream: shouldStream,
+          maxTokens: max_tokens ?? defaultMaxTokens,
+          temperature,
+          topP: top_p,
+          thinking: thinkingEnabled,
+          thinkingVisible: thinkingEnabled,
+          tools,
+          toolChoice: tool_choice,
+          webSearch,
+          use300k: modelHasFeature(resolved, "output_300k_beta"),
+          cacheControl,
+          startTime,
+          anthropicDefaults: getAnthropicDefaults(resolved),
+          requestHeaders: resolved.headers,
+        });
       } else if (isGeminiModel) {
         const geminiAlias = selectedModel ? resolveGeminiAlias(selectedModel) : undefined;
         if (!geminiAlias) {
@@ -1228,29 +1059,10 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         }
         result = await handleGemini({ req, res, model: geminiAlias.actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinkingConfig: geminiAlias.thinkingConfig, startTime });
       } else if (isOpenRouterModel) {
-        // Detect effort-based models: <base>-low or <base>-high (always visible)
-        const orEffortMatch = selectedModel.match(/^(.+)-(low|high)$/);
-        const orThinkingEnabled = !orEffortMatch && selectedModel.endsWith("-thinking");
-
-        let orActualModel: string;
-        let orReasoning: { enabled: boolean } | { effort: string } | undefined;
-
-        if (orEffortMatch) {
-          orActualModel = orEffortMatch[1] ?? selectedModel;
-          orReasoning = { effort: orEffortMatch[2] ?? "high" };
-        } else {
-          orActualModel = orThinkingEnabled ? selectedModel.replace(/-thinking$/, "") : selectedModel;
-          if (orThinkingEnabled) {
-            orReasoning = { enabled: true };
-          } else if (OPENROUTER_EFFORT_NONE_SET.has(orActualModel)) {
-            orReasoning = { effort: "none" };
-          } else {
-            orReasoning = undefined;
-          }
-        }
-
         // Client-provided reasoning takes priority over the model-suffix-derived value
-        const finalOrReasoning = resolvedClientReasoning ?? orReasoning;
+        const finalOrReasoning = resolvedClientReasoning ?? getOpenRouterReasoning(resolved);
+        const orActualModel = resolved.actualModel;
+        const orProviderRouting = getOpenRouterProviderRouting(resolved);
 
         if (orActualModel.startsWith("anthropic/")) {
           const cacheControl = cache_control ?? { type: "ephemeral" };
@@ -1265,24 +1077,17 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
             toolChoice: tool_choice,
             startTime,
             reasoning: finalOrReasoning,
-            providerRouting: { order: ["Bedrock"], allow_fallbacks: true },
+            providerRouting: orProviderRouting,
             cacheControl,
           });
         } else {
           const client = makeLocalOpenRouter();
-          const orImageModalities = OPENROUTER_IMAGE_TEXT_MODELS.has(orActualModel)
-            ? ["image", "text"] as const
-            : OPENROUTER_IMAGE_ONLY_MODELS.has(orActualModel)
-              ? ["image"] as const
-              : undefined;
-          const orProviderRouting = orActualModel.startsWith("anthropic/")
-            ? { order: ["Bedrock"], allow_fallbacks: true }
-            : undefined;
-          result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: !!(orThinkingEnabled || orEffortMatch), imageModalities: orImageModalities, providerRouting: orProviderRouting });
+          const orImageModalities = getOpenRouterModalities(resolved);
+          result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: modelHasFeature(resolved, "visible_reasoning"), imageModalities: orImageModalities, providerRouting: orProviderRouting });
         }
       } else {
         const client = makeLocalOpenAI();
-        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
+        result = await handleOpenAI({ req, res, client, model: resolved.actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
       }
       // ✅ Success — record stats, mark friend healthy, and exit retry loop
       if (backend.kind === "friend") setHealth(backend.url, true);
@@ -1560,9 +1365,7 @@ function injectToolIdMarker(
  */
 /** Returns true if the model version is 4.6 or newer (no assistant prefill support). */
 function modelNoPrefill(model: string): boolean {
-  const m = model.match(/-(\d+)-(\d+)/);
-  if (!m) return false;
-  return parseInt(m[1]) * 100 + parseInt(m[2]) >= 406;
+  return modelHasFeature(model, "no_prefill");
 }
 
 function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string): AnthropicMessage[] {
@@ -1779,19 +1582,15 @@ function sanitizeAnthropicMessages(messages: AnthropicMessage[], model?: string)
 }
 
 function normalizeOpenRouterClaudeModel(model: string): string {
-  if (!model.startsWith("anthropic/")) return model;
-  const withoutSuffix = stripVisibleSuffix(model)
-    .replace(/-thinking$/, "")
-    .replace(/-search$/, "");
-  return withoutSuffix;
+  return resolveModel(stripVisibleSuffix(model))?.actualModel ?? model;
 }
 
 function isSupportedOpenRouterClaudeModel(model: string): boolean {
-  return /^anthropic\/claude-opus-4\.(7|6|5)$/.test(normalizeOpenRouterClaudeModel(model));
+  return modelHasFeature(stripVisibleSuffix(model), "anthropic_messages_bridge");
 }
 
 function shouldRouteAnthropicMessagesViaOpenRouter(model: string): boolean {
-  return model.startsWith("anthropic/") && isSupportedOpenRouterClaudeModel(model);
+  return isSupportedOpenRouterClaudeModel(model);
 }
 
 function toOpenRouterClaudeModel(model: string): string {
@@ -1835,19 +1634,10 @@ function withDefaultAnthropicCacheControl(system: unknown, messages: AnthropicMe
 function mapClaudeEffortToOpenRouterVerbosity(model: string, effort: unknown): string | undefined {
   if (typeof effort !== "string") return undefined;
   const normalized = effort.toLowerCase();
-  const openRouterModel = normalizeOpenRouterClaudeModel(model);
-  if (openRouterModel.endsWith("4.7")) {
-    return ["low", "medium", "high", "xhigh", "max"].includes(normalized) ? normalized : undefined;
-  }
-  if (openRouterModel.endsWith("4.6")) {
-    if (normalized === "xhigh") return "max";
-    return ["low", "medium", "high", "max"].includes(normalized) ? normalized : undefined;
-  }
-  if (openRouterModel.endsWith("4.5")) {
-    if (normalized === "xhigh" || normalized === "max") return "high";
-    return ["low", "medium", "high"].includes(normalized) ? normalized : undefined;
-  }
-  return undefined;
+  const map = resolveModel(stripVisibleSuffix(model))?.openrouter.verbosity_effort_map;
+  return map && typeof map === "object" && !Array.isArray(map) && typeof (map as Record<string, unknown>)[normalized] === "string"
+    ? (map as Record<string, string>)[normalized]
+    : undefined;
 }
 
 function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<string, unknown>, rest: Record<string, unknown>, modelThinkingEnabled = false): void {
@@ -1866,7 +1656,8 @@ function applyAnthropicThinkingForOpenRouter(model: string, payload: Record<stri
     payload.reasoning = { enabled: true };
     delete payload.thinking;
   } else if (!thinking && !rest.reasoning) {
-    payload.reasoning = { effort: "none" };
+    const defaultReasoning = getOpenRouterReasoning(resolveModel(stripVisibleSuffix(model)));
+    if (defaultReasoning) payload.reasoning = defaultReasoning;
     delete payload.thinking;
   } else if (!thinking) {
     delete payload.thinking;
@@ -2104,17 +1895,21 @@ async function handleAnthropicMessagesViaOpenRouter({
   }
 
   const endpoint = `${baseURL.replace(/\/$/, "")}/chat/completions`;
+  const resolved = resolveModel(stripVisibleSuffix(model));
   const openAIModel = toOpenRouterClaudeModel(model);
   const bridgeMessages = cacheControl
     ? messages
     : withDefaultAnthropicCacheControl(system, messages);
   const payload: Record<string, unknown> = {
+    ...(getOpenRouterParams(resolved) ?? {}),
     ...rest,
     model: openAIModel,
     messages: anthropicMessagesToOpenAI(system, bridgeMessages),
     stream,
     max_tokens: maxTokens,
   };
+  const providerRouting = getOpenRouterProviderRouting(resolved);
+  if (providerRouting && !payload.provider) payload.provider = providerRouting;
   if (stream) payload.stream_options = { include_usage: true };
   const convertedTools = anthropicToolsToOpenAI(tools);
   if (convertedTools?.length) payload.tools = convertedTools;
@@ -2378,7 +2173,12 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
   const { model, messages, system, stream, max_tokens, cache_control, tools: clientTools, ...rest } = body;
   const rawModel = stripVisibleSuffix(model ?? "claude-sonnet-4-5");
-  const isSearchModel = /^claude-opus-4[-.]6-search$/i.test(rawModel);
+  const resolvedRawModel = resolveModel(rawModel);
+  if (!resolvedRawModel) {
+    res.status(404).json({ error: { type: "invalid_request_error", message: `Unknown model '${rawModel}'` } });
+    return;
+  }
+  const isSearchModel = modelHasFeature(resolvedRawModel, "web_search");
   const taggedSystem = stripSearchControlTagsFromSystem(system);
   const tagged = stripSearchControlTagsFromMessages(messages);
   const searchInvisibleEnabled = tagged.invisibleEnabled || taggedSystem.invisibleEnabled;
@@ -2388,29 +2188,15 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
 
   const routeViaOpenRouter = shouldRouteAnthropicMessagesViaOpenRouter(rawModel);
 
-  // Reject disabled local models. OpenRouter bridge models are gated by the bridge allow-list above.
-  if (!routeViaOpenRouter && !isModelEnabled(rawModel)) {
+  if (!isModelEnabled(rawModel)) {
     res.status(403).json({ error: { type: "invalid_request_error", message: `Model '${rawModel}' is disabled on this gateway` } });
     return;
   }
 
-  // Resolve model-suffix aliases (same system as /v1/chat/completions)
-  const webSearch = rawModel.endsWith("-search");
-  const stripped = webSearch ? rawModel.replace(/-search$/, "") : rawModel;
-  const thinkingEnabled = stripped.endsWith("-thinking");
-  const selectedModel = thinkingEnabled ? stripped.replace(/-thinking$/, "") : stripped;
-
-  // Model-specific max_tokens defaults
-  const CLAUDE_MODEL_MAX: Record<string, number> = {
-    "claude-haiku-4-5": 8096,
-    "claude-sonnet-4-5": 64000,
-    "claude-sonnet-4-6": 128000,
-    "claude-opus-4-1": 64000,
-    "claude-opus-4-5": 64000,
-    "claude-opus-4-6": 128000,
-    "claude-opus-4-7": 128000,
-  };
-  const modelMax = CLAUDE_MODEL_MAX[selectedModel] ?? 32000;
+  const webSearch = modelHasFeature(resolvedRawModel, "web_search");
+  const thinkingEnabled = modelHasFeature(resolvedRawModel, "visible_reasoning");
+  const selectedModel = routeViaOpenRouter ? rawModel : resolvedRawModel.actualModel;
+  const modelMax = resolvedRawModel.maxTokens ?? 32000;
   const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
   const maxTokens = max_tokens ?? defaultMaxTokens;
 
@@ -2420,12 +2206,8 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
   req.log.info({ model: selectedModel, rawModel, stream: shouldStream, webSearch, thinking: thinkingEnabled, hideSearchToolFromClient, appendSearchReferenceText }, "Anthropic /v1/messages request");
   req.log.info({ payload: JSON.stringify(req.body) }, "Anthropic /v1/messages full payload");
 
-  // Build thinking param if needed (and not already provided by client)
-  const isAdaptiveThinkingModel = selectedModel.includes("4-6") || selectedModel.includes("4.6") || selectedModel.includes("4-7") || selectedModel.includes("4.7");
   const thinkingParam = thinkingEnabled && !rest.thinking
-    ? isAdaptiveThinkingModel
-      ? { thinking: { type: "adaptive" as const }, output_config: { effort: "xhigh" } }
-      : { thinking: { type: "enabled" as const, budget_tokens: 16000 } }
+    ? getAnthropicDefaults(resolvedRawModel)
     : {};
 
   // Inject web_search tool if needed, alongside any client-supplied tools
@@ -2506,6 +2288,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       ...(mergedTools.length ? { tools: mergedTools } : {}),
       ...safeRest,
     } as Parameters<typeof client.messages.create>[0];
+    const requestOptions = resolvedRawModel.headers ? { headers: resolvedRawModel.headers } : undefined;
 
     if (shouldStream) {
       res.setHeader("Content-Type", "text/event-stream");
@@ -2524,7 +2307,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
       let seenMessageStop = false;
 
       try {
-        const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0]);
+        const claudeStream = client.messages.stream(createParams as Parameters<typeof client.messages.stream>[0], requestOptions);
 
         const hiddenIndexes = new Set<number>();
         const hiddenServerBlocks = new Map<number, { startBlock: Record<string, unknown>; textChunks: string[] }>();
@@ -2623,7 +2406,7 @@ router.post("/v1/messages", requireApiKey, async (req: Request, res: Response) =
         clearInterval(keepalive);
       }
     } else {
-      const rawResult = await client.messages.create(createParams);
+      const rawResult = await client.messages.create(createParams, requestOptions);
       const rawContent = (rawResult as unknown as { content?: unknown }).content;
       const resultWithMarkers = appendSearchReferenceText
         ? {
@@ -2871,9 +2654,11 @@ router.patch("/v1/admin/routing", requireApiKey, (req: Request, res: Response) =
 
 // GET /v1/admin/models — list all models with provider + enabled status
 router.get("/v1/admin/models", requireApiKey, (_req: Request, res: Response) => {
+  refreshModelRegistryIfChanged();
   const models = ALL_MODELS.map((m) => ({
     id: m.id,
     provider: MODEL_PROVIDER_MAP.get(m.id) ?? "openrouter",
+    description: m.description,
     enabled: isModelEnabled(m.id),
   }));
   const summary: Record<string, { total: number; enabled: number }> = {};
@@ -2888,6 +2673,7 @@ router.get("/v1/admin/models", requireApiKey, (_req: Request, res: Response) => 
 // PATCH /v1/admin/models — bulk enable/disable by ids or by provider
 // Body: { ids?: string[], provider?: string, enabled: boolean }
 router.patch("/v1/admin/models", requireApiKey, (req: Request, res: Response) => {
+  refreshModelRegistryIfChanged();
   const { ids, provider, enabled } = req.body as { ids?: string[]; provider?: string; enabled?: boolean };
   if (typeof enabled !== "boolean") { res.status(400).json({ error: "enabled (boolean) required" }); return; }
 
@@ -2906,6 +2692,33 @@ router.patch("/v1/admin/models", requireApiKey, (req: Request, res: Response) =>
   }
   saveDisabledModels(disabledModels);
   res.json({ updated: targets.length, enabled, ids: targets });
+});
+
+router.get("/v1/admin/model-registry", requireApiKey, (_req: Request, res: Response) => {
+  try {
+    refreshModelRegistryIfChanged();
+    res.json({ content: readModelsJsonText(), models: ALL_MODELS.length });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to read models.json";
+    res.status(500).json({ error: message });
+  }
+});
+
+router.post("/v1/admin/model-registry/upload", requireApiKey, (req: Request, res: Response) => {
+  const { content } = req.body as { content?: unknown };
+  if (typeof content !== "string" || !content.trim()) {
+    res.status(400).json({ error: "content (string) is required" });
+    return;
+  }
+  try {
+    const result = replaceModelsJson(content);
+    disabledModels = new Set([...disabledModels].filter((id) => MODEL_PROVIDER_MAP.has(id)));
+    saveDisabledModels(disabledModels);
+    res.json({ ok: true, ...result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Invalid models.json";
+    res.status(400).json({ error: message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -3265,10 +3078,7 @@ async function handleOpenRouterFetch({
     messages,
     stream,
   };
-  if (model === "anthropic/claude-opus-4.6" || model === "anthropic/claude-opus-4.6-fast") {
-    payload.temperature = 1;
-    payload.top_p = 1;
-  }
+  Object.assign(payload, getOpenRouterParams(resolveModel(model)) ?? {});
   if (maxTokens) payload.max_tokens = maxTokens;
   if (tools?.length) payload.tools = tools;
   if (toolChoice !== undefined) payload.tool_choice = toolChoice;
@@ -3387,7 +3197,7 @@ interface GeminiResponse {
 }
 
 function resolveGeminiAlias(model: string): GeminiModelAlias | undefined {
-  return GEMINI_MODEL_ALIASES[stripVisibleSuffix(model)];
+  return getGeminiAlias(stripVisibleSuffix(model));
 }
 
 function extractGeminiUsageMetrics(usage: unknown): ExtendedUsageMetrics | undefined {
@@ -3681,7 +3491,7 @@ async function handleGemini({
 }
 
 async function handleClaude({
-  req, res, client, model, messages, stream, maxTokens, temperature, topP, thinking = false, thinkingVisible = false, tools, toolChoice, webSearch = false, use300k = false, cacheControl, startTime,
+  req, res, client, model, messages, stream, maxTokens, temperature, topP, thinking = false, thinkingVisible = false, tools, toolChoice, webSearch = false, use300k = false, cacheControl, startTime, anthropicDefaults, requestHeaders,
 }: {
   req: Request;
   res: Response;
@@ -3700,6 +3510,8 @@ async function handleClaude({
   use300k?: boolean;
   cacheControl?: { type?: string };
   startTime: number;
+  anthropicDefaults?: Record<string, unknown>;
+  requestHeaders?: Record<string, string>;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   const effectiveCacheControl = cacheControl ?? { type: "ephemeral" };
   // Extract system prompt
@@ -3711,19 +3523,8 @@ async function handleClaude({
   // Convert all messages including tool_calls / tool roles
   const chatMessages = convertMessagesForClaude(messages);
 
-  const isAdaptiveThinkingModel = model.includes("4-6") || model.includes("4.6") || model.includes("4-7") || model.includes("4.7");
-  const thinkingParam = thinking
-    ? use300k
-      ? { thinking: { type: "enabled" as const, effort: "max" } }
-      : isAdaptiveThinkingModel
-        ? { thinking: { type: "adaptive" as const }, output_config: { effort: "xhigh" } }
-        : { thinking: { type: "enabled" as const, budget_tokens: 16000 } }
-    : {};
-
-  // Per-request options: inject 300k beta header when needed
-  const requestOptions = use300k
-    ? { headers: { "anthropic-beta": "output-300k-2026-03-24" } }
-    : {};
+  const thinkingParam = thinking ? (anthropicDefaults ?? {}) : {};
+  const requestOptions = requestHeaders ? { headers: requestHeaders } : {};
 
   // Convert tools to Anthropic format
   const anthropicTools = tools?.length ? convertToolsForClaude(tools) : undefined;
@@ -3768,7 +3569,7 @@ async function handleClaude({
   const buildCreateParams = () => ({
     model,
     max_tokens: maxTokens,
-    ...((isAdaptiveThinkingModel && !use300k)
+    ...((thinkingParam.output_config && !use300k)
       ? {}
       : { temperature: temperature ?? 1 }),
     ...(systemMessages ? { system: systemMessages } : {}),
