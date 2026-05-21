@@ -840,7 +840,36 @@
       "model": "google/gemini-3.5-flash",
       "provider": "openrouter",
       "actual_model": "google/gemini-3.5-flash",
-      "pricing": [{ "min_tokens": 0, "input": 0.075, "output": 0.3 }]
+      "pricing": [{ "min_tokens": 0, "input": 0.075, "output": 0.3 }],
+      "aliases": [
+        {
+          "id": "google/gemini-3.5-flash",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "medium" }
+            }
+          }
+        },
+        {
+          "id": "google/gemini-3.5-flash-low",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "google/gemini-3.5-flash-high",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "high" }
+            }
+          }
+        }
+      ]
     }
   ]
 }

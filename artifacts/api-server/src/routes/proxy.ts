@@ -1,4 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
+import express from "express";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { readJson, writeJson } from "../lib/cloudPersist";
@@ -24,6 +25,11 @@ import {
 } from "../lib/modelRegistry";
 
 const router: IRouter = Router();
+router.use(/^\/v1\/images\/(generations|edits)$/, expressRawBody);
+
+function expressRawBody(req: Request, res: Response, next: () => void): void {
+  express.raw({ type: () => true, limit: "50mb" })(req, res, next);
+}
 
 // ---------------------------------------------------------------------------
 // Backend pool — round-robin across local account + multiple friend proxies
@@ -727,6 +733,98 @@ function requireApiKeyWithQuery(req: Request, res: Response, next: () => void) {
   requireApiKey(req, res, next);
 }
 
+interface ParsedImageRequest {
+  fields: Record<string, string>;
+  images: string[];
+}
+
+function parseMultipartImageRequest(req: Request): ParsedImageRequest {
+  const contentType = req.headers["content-type"] ?? "";
+  const boundary = /boundary=([^;]+)/i.exec(String(contentType))?.[1];
+  const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  if (!boundary || body.length === 0) return { fields: {}, images: [] };
+
+  const boundaryText = `--${boundary}`;
+  const text = body.toString("latin1");
+  const parts = text.split(boundaryText).slice(1, -1);
+  const fields: Record<string, string> = {};
+  const images: string[] = [];
+
+  for (const part of parts) {
+    const trimmed = part.replace(/^\r\n/, "").replace(/\r\n$/, "");
+    const splitAt = trimmed.indexOf("\r\n\r\n");
+    if (splitAt < 0) continue;
+    const rawHeaders = trimmed.slice(0, splitAt);
+    const rawBody = trimmed.slice(splitAt + 4);
+    const name = /name="([^"]+)"/i.exec(rawHeaders)?.[1];
+    if (!name) continue;
+    const contentTypeHeader = /content-type:\s*([^\r\n]+)/i.exec(rawHeaders)?.[1]?.trim();
+    const filename = /filename="([^"]*)"/i.exec(rawHeaders)?.[1];
+    const partBuffer = Buffer.from(rawBody, "latin1");
+    if (filename || contentTypeHeader?.startsWith("image/")) {
+      const mime = contentTypeHeader && contentTypeHeader.startsWith("image/") ? contentTypeHeader : "image/png";
+      images.push(`data:${mime};base64,${partBuffer.toString("base64")}`);
+    } else {
+      fields[name] = partBuffer.toString("utf8").trim();
+    }
+  }
+
+  return { fields, images };
+}
+
+function parseJsonImageRequest(req: Request): ParsedImageRequest {
+  const body = Buffer.isBuffer(req.body)
+    ? JSON.parse(req.body.toString("utf8") || "{}") as Record<string, unknown>
+    : (req.body ?? {}) as Record<string, unknown>;
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (typeof value === "string") fields[key] = value;
+    else if (typeof value === "number" || typeof value === "boolean") fields[key] = String(value);
+  }
+  const images: string[] = [];
+  const image = body.image;
+  const inputImage = body.input_image;
+  for (const value of [image, inputImage]) {
+    if (typeof value === "string") images.push(value);
+    else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === "string") images.push(item);
+    }
+  }
+  return { fields, images };
+}
+
+function parseOpenAIImageRequest(req: Request): ParsedImageRequest {
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (contentType.includes("multipart/form-data")) return parseMultipartImageRequest(req);
+  return parseJsonImageRequest(req);
+}
+
+function sizeToAspectRatio(size?: string): string | undefined {
+  const match = /^(\d+)x(\d+)$/i.exec(size ?? "");
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!width || !height) return undefined;
+  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+  const d = gcd(width, height);
+  return `${width / d}:${height / d}`;
+}
+
+function extractOpenAIImageData(result: Record<string, unknown>, responseFormat: string): Array<Record<string, string>> {
+  const choices = result.choices as Array<Record<string, unknown>> | undefined;
+  const data: Array<Record<string, string>> = [];
+  for (const choice of choices ?? []) {
+    const msg = choice.message as Record<string, unknown> | undefined;
+    const content = typeof msg?.content === "string" ? msg.content : "";
+    const matches = content.matchAll(/data:image\/[^;]+;base64,([A-Za-z0-9+/=]+)/g);
+    for (const match of matches) {
+      if (responseFormat === "url") data.push({ url: `data:image/png;base64,${match[1]}` });
+      else data.push({ b64_json: match[1] ?? "" });
+    }
+  }
+  return data;
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -952,6 +1050,88 @@ function convertMessagesForClaude(messages: OAIMessage[]): AnthropicMessage[] {
 
   return result;
 }
+
+router.post(/^\/v1\/images\/(generations|edits)$/, requireApiKey, async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  try {
+    const { fields, images } = parseOpenAIImageRequest(req);
+    const model = stripVisibleSuffix(fields.model ?? "bytedance-seed/seedream-4.5");
+    const prompt = fields.prompt ?? "";
+    const n = Math.max(1, Math.min(4, Number(fields.n ?? 1) || 1));
+    const responseFormat = fields.response_format === "url" ? "url" : "b64_json";
+    const resolved = resolveModel(model);
+    if (!resolved) {
+      res.status(404).json({ error: { message: `Unknown model '${model}'`, type: "invalid_request_error", code: "model_not_found" } });
+      return;
+    }
+    if (!isModelEnabled(model)) {
+      res.status(403).json({ error: { message: `Model '${model}' is disabled on this gateway`, type: "invalid_request_error", code: "model_disabled" } });
+      return;
+    }
+    if (resolved.provider !== "openrouter" || !modelHasFeature(resolved, "image_only")) {
+      res.status(400).json({ error: { message: `Model '${model}' is not configured as an OpenRouter image model`, type: "invalid_request_error" } });
+      return;
+    }
+
+    const content: OAIContentPart[] = [{ type: "text", text: fields.size ? `${prompt}\n\nRequested size: ${fields.size}.` : prompt }];
+    for (const imageUrl of images) content.push({ type: "image_url", image_url: { url: imageUrl } });
+
+    const client = makeLocalOpenRouter();
+    const imageConfig: Record<string, unknown> = {};
+    const aspectRatio = fields.aspect_ratio ?? sizeToAspectRatio(fields.size);
+    if (aspectRatio) imageConfig.aspect_ratio = aspectRatio;
+    if (fields.quality) imageConfig.quality = fields.quality;
+    if (fields.size) imageConfig.size = fields.size;
+    if (fields.image_size) imageConfig.image_size = fields.image_size;
+
+    const data: Array<Record<string, string>> = [];
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let usage: ExtendedUsageMetrics | undefined;
+    for (let i = 0; i < n; i++) {
+      const params: Record<string, unknown> = {
+        model: resolved.actualModel,
+        messages: [{ role: "user", content }],
+        stream: false,
+        modalities: getOpenRouterModalities(resolved) ?? ["image"],
+      };
+      const providerRouting = getOpenRouterProviderRouting(resolved);
+      if (providerRouting) params.provider = providerRouting;
+      if (Object.keys(imageConfig).length > 0) params.image_config = imageConfig;
+      const result = await client.chat.completions.create(params as unknown as Parameters<typeof client.chat.completions.create>[0]) as OpenAI.Chat.Completions.ChatCompletion;
+      const resultRecord = result as unknown as Record<string, unknown>;
+      normalizeImageResponse(resultRecord);
+      data.push(...extractOpenAIImageData(resultRecord, responseFormat));
+      promptTokens += result.usage?.prompt_tokens ?? 0;
+      completionTokens += result.usage?.completion_tokens ?? 0;
+      usage = extractExtendedUsageMetrics(result.usage) ?? usage;
+    }
+
+    const duration = Date.now() - startTime;
+    recordCallStat("openrouter", duration, promptTokens, completionTokens, undefined, model, usage);
+    pushRequestLog({
+      method: req.method, path: req.path, model,
+      backend: "openrouter", status: 200, duration, stream: false,
+      promptTokens, completionTokens,
+      totalTokens: usage?.totalTokens ?? (promptTokens + completionTokens),
+      costUsd: usage?.costUsd,
+      cachedTokens: usage?.cachedTokens,
+      cacheWriteTokens: usage?.cacheWriteTokens,
+      reasoningTokens: usage?.reasoningTokens,
+      level: "info",
+    });
+    res.json({ created: Math.floor(Date.now() / 1000), data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Image generation failed";
+    req.log.error({ err }, "OpenAI-compatible image endpoint failed");
+    pushRequestLog({
+      method: req.method, path: req.path, backend: "openrouter",
+      status: 500, duration: Date.now() - startTime, stream: false,
+      level: "error", error: message,
+    });
+    res.status(500).json({ error: { message, type: "api_error" } });
+  }
+});
 
 router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Response) => {
   const { model, messages, stream, max_tokens, temperature, top_p, tools, tool_choice, reasoning: clientReasoning, reasoning_effort: clientReasoningEffort, cache_control } = req.body as {

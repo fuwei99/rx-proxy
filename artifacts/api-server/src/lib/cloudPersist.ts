@@ -25,6 +25,9 @@ const LOCAL_DIR = IS_PROD ? "data_prod" : "data_dev";
 const REPLIT_SIDECAR_ENDPOINT = "http://127.0.0.1:1106";
 
 let _storage: Storage | null = null;
+let gcsDisabledReason: string | null = null;
+const warnedGcsWriteFailures = new Set<string>();
+
 function getStorage(): Storage {
   if (!_storage) {
     _storage = new Storage({
@@ -48,12 +51,27 @@ function getStorage(): Storage {
   return _storage;
 }
 
+function localPathFor(name: string): string {
+  return resolve(process.cwd(), LOCAL_DIR, name);
+}
+
+function writeLocalJson<T>(name: string, data: T): void {
+  const localPath = localPathFor(name);
+  mkdirSync(dirname(localPath), { recursive: true });
+  writeFileSync(localPath, JSON.stringify(data, null, 2), "utf8");
+}
+
+function summarizeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 /**
  * Read a JSON config file.  Returns `null` if the file does not exist yet.
  * @param name  Base filename, e.g. "dynamic_backends.json"
  */
 export async function readJson<T>(name: string): Promise<T | null> {
-  if (BUCKET_ID) {
+  if (BUCKET_ID && !gcsDisabledReason) {
     try {
       const bucket = getStorage().bucket(BUCKET_ID);
       const file = bucket.file(`${GCS_PREFIX}${name}`);
@@ -61,12 +79,12 @@ export async function readJson<T>(name: string): Promise<T | null> {
       if (!exists) return null;
       const [contents] = await file.download();
       return JSON.parse(contents.toString("utf8")) as T;
-    } catch {
-      return null;
+    } catch (err) {
+      gcsDisabledReason = summarizeError(err);
     }
   }
 
-  const localPath = resolve(process.cwd(), LOCAL_DIR, name);
+  const localPath = localPathFor(name);
   if (!existsSync(localPath)) return null;
   try {
     return JSON.parse(readFileSync(localPath, "utf8")) as T;
@@ -81,20 +99,20 @@ export async function readJson<T>(name: string): Promise<T | null> {
  * @param data  The data to serialise and persist.
  */
 export async function writeJson<T>(name: string, data: T): Promise<void> {
-  const json = JSON.stringify(data, null, 2);
-
-  if (BUCKET_ID) {
+  if (BUCKET_ID && !gcsDisabledReason) {
     try {
       const bucket = getStorage().bucket(BUCKET_ID);
       const file = bucket.file(`${GCS_PREFIX}${name}`);
-      await file.save(json, { contentType: "application/json" });
+      await file.save(JSON.stringify(data, null, 2), { contentType: "application/json" });
+      return;
     } catch (err) {
-      console.error(`[cloudPersist] GCS write failed for ${name}:`, err);
+      gcsDisabledReason = summarizeError(err);
+      if (!warnedGcsWriteFailures.has(name)) {
+        warnedGcsWriteFailures.add(name);
+        console.warn(`[cloudPersist] GCS unavailable for ${name}; using local ${LOCAL_DIR}. Reason: ${gcsDisabledReason}`);
+      }
     }
-    return;
   }
 
-  const localPath = resolve(process.cwd(), LOCAL_DIR, name);
-  mkdirSync(dirname(localPath), { recursive: true });
-  writeFileSync(localPath, json, "utf8");
+  writeLocalJson(name, data);
 }
