@@ -356,6 +356,32 @@
       "actual_model": "x-ai/grok-4-fast"
     },
     {
+      "model": "x-ai/grok-imagine-image-quality",
+      "provider": "openrouter",
+      "actual_model": "x-ai/grok-imagine-image-quality",
+      "features": ["image_only", "stream_to_nonstream_for_image"],
+      "defaults": {
+        "openrouter": {
+          "modalities": ["image"],
+          "image_config_tags": {
+            "syntax": "<||name:value||>",
+            "strip_from_prompt": true,
+            "tags": {
+              "size": {
+                "target": "image_config.aspect_ratio",
+                "allowed": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "auto"]
+              },
+              "quality": {
+                "target": "image_config.resolution",
+                "normalize": "lowercase",
+                "allowed": ["1k", "2k"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "model": "meta-llama/llama-4-maverick",
       "provider": "openrouter",
       "actual_model": "meta-llama/llama-4-maverick"
@@ -807,7 +833,22 @@
       "features": ["image_only", "stream_to_nonstream_for_image"],
       "defaults": {
         "openrouter": {
-          "modalities": ["image"]
+          "modalities": ["image"],
+          "image_config_tags": {
+            "syntax": "<||name:value||>",
+            "strip_from_prompt": true,
+            "tags": {
+              "size": {
+                "target": "image_config.aspect_ratio",
+                "allowed": ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9"]
+              },
+              "quality": {
+                "target": "image_config.image_size",
+                "normalize": "uppercase",
+                "allowed": ["0.5K", "1K", "2K", "4K"]
+              }
+            }
+          }
         }
       }
     },

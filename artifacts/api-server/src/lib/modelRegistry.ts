@@ -271,6 +271,11 @@ export function getOpenRouterParams(model: ResolvedModel | undefined): Record<st
   return isRecord(params) ? params : undefined;
 }
 
+export function getOpenRouterImageConfigTags(model: ResolvedModel | undefined): Record<string, unknown> | undefined {
+  const tags = getOpenRouterDefaults(model).image_config_tags;
+  return isRecord(tags) ? tags : undefined;
+}
+
 export function getOpenRouterReasoning(model: ResolvedModel | undefined): { enabled: boolean } | { effort: string } | undefined {
   const reasoning = getOpenRouterDefaults(model).reasoning;
   if (!isRecord(reasoning)) return undefined;

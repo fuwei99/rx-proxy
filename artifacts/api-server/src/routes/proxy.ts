@@ -10,6 +10,7 @@ import {
   MODEL_PROVIDER_MAP,
   getAnthropicDefaults,
   getGeminiAlias,
+  getOpenRouterImageConfigTags,
   getOpenRouterModalities,
   getOpenRouterParams,
   getOpenRouterProviderRouting,
@@ -825,6 +826,71 @@ function extractOpenAIImageData(result: Record<string, unknown>, responseFormat:
   return data;
 }
 
+function applyNestedValue(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let cursor = target;
+  for (const part of parts.slice(0, -1)) {
+    const existing = cursor[part];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) cursor[part] = {};
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1] ?? path] = value;
+}
+
+function normalizeTaggedValue(value: string, normalize?: unknown): string {
+  if (normalize === "lowercase") return value.toLowerCase();
+  if (normalize === "uppercase") return value.toUpperCase();
+  return value;
+}
+
+function extractImageConfigTags(prompt: string, model: ReturnType<typeof resolveModel>): { prompt: string; imageConfig: Record<string, unknown> } {
+  const config = getOpenRouterImageConfigTags(model);
+  const tagDefs = config?.tags;
+  if (!tagDefs || typeof tagDefs !== "object" || Array.isArray(tagDefs)) return { prompt, imageConfig: {} };
+  const imageConfig: Record<string, unknown> = {};
+  let nextPrompt = prompt;
+  const strip = config.strip_from_prompt !== false;
+
+  nextPrompt = nextPrompt.replace(/<\|\|([a-zA-Z0-9_-]+):([^|]+)\|\|>/g, (full, rawName: string, rawValue: string) => {
+    const tagDef = (tagDefs as Record<string, unknown>)[rawName];
+    if (!tagDef || typeof tagDef !== "object" || Array.isArray(tagDef)) return full;
+    const record = tagDef as Record<string, unknown>;
+    const target = typeof record.target === "string" ? record.target : undefined;
+    if (!target?.startsWith("image_config.")) return full;
+    const normalized = normalizeTaggedValue(rawValue.trim(), record.normalize);
+    const allowed = Array.isArray(record.allowed) ? record.allowed.map(String) : undefined;
+    if (allowed && !allowed.includes(normalized)) return strip ? "" : full;
+    applyNestedValue(imageConfig, target.replace(/^image_config\./, ""), normalized);
+    return strip ? "" : full;
+  });
+
+  return { prompt: nextPrompt.replace(/\n{3,}/g, "\n\n").trim(), imageConfig };
+}
+
+function extractImageTagsFromMessages(messages: OAIMessage[], model: ReturnType<typeof resolveModel>): { messages: OAIMessage[]; imageConfig: Record<string, unknown> } {
+  const imageConfig: Record<string, unknown> = {};
+  const next = messages.map((msg) => {
+    if (typeof msg.content === "string") {
+      const extracted = extractImageConfigTags(msg.content, model);
+      Object.assign(imageConfig, extracted.imageConfig);
+      return { ...msg, content: extracted.prompt } as OAIMessage;
+    }
+    if (Array.isArray(msg.content)) {
+      let changed = false;
+      const content = msg.content.map((part) => {
+        if (part.type !== "text" || typeof (part as { text?: unknown }).text !== "string") return part;
+        const extracted = extractImageConfigTags((part as { text: string }).text, model);
+        Object.assign(imageConfig, extracted.imageConfig);
+        if (extracted.prompt !== (part as { text: string }).text) changed = true;
+        return { ...part, text: extracted.prompt };
+      });
+      return changed ? ({ ...msg, content } as OAIMessage) : msg;
+    }
+    return msg;
+  });
+  return { messages: next, imageConfig };
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -1073,11 +1139,12 @@ router.post(/^\/v1\/images\/(generations|edits)$/, requireApiKey, async (req: Re
       return;
     }
 
-    const content: OAIContentPart[] = [{ type: "text", text: fields.size ? `${prompt}\n\nRequested size: ${fields.size}.` : prompt }];
+    const tagged = extractImageConfigTags(prompt, resolved);
+    const content: OAIContentPart[] = [{ type: "text", text: fields.size ? `${tagged.prompt}\n\nRequested size: ${fields.size}.` : tagged.prompt }];
     for (const imageUrl of images) content.push({ type: "image_url", image_url: { url: imageUrl } });
 
     const client = makeLocalOpenRouter();
-    const imageConfig: Record<string, unknown> = {};
+    const imageConfig: Record<string, unknown> = { ...tagged.imageConfig };
     const aspectRatio = fields.aspect_ratio ?? sizeToAspectRatio(fields.size);
     if (aspectRatio) imageConfig.aspect_ratio = aspectRatio;
     if (fields.quality) imageConfig.quality = fields.quality;
@@ -1263,7 +1330,14 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         } else {
           const client = makeLocalOpenRouter();
           const orImageModalities = getOpenRouterModalities(resolved);
-          result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: modelHasFeature(resolved, "visible_reasoning"), imageModalities: orImageModalities, providerRouting: orProviderRouting });
+          let imageConfig: Record<string, unknown> | undefined;
+          let routedMessages = finalMessages;
+          if (orImageModalities) {
+            const extracted = extractImageTagsFromMessages(finalMessages, resolved);
+            routedMessages = extracted.messages;
+            imageConfig = extracted.imageConfig;
+          }
+          result = await handleOpenAI({ req, res, client, model: orActualModel, messages: routedMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: finalOrReasoning, thinkingVisible: modelHasFeature(resolved, "visible_reasoning"), imageModalities: orImageModalities, providerRouting: orProviderRouting, imageConfig });
         }
       } else {
         const client = makeLocalOpenAI();
@@ -3092,7 +3166,7 @@ function normalizeImageResponse(result: Record<string, unknown>): void {
 }
 
 async function handleOpenAI({
-  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, thinkingVisible, imageModalities, providerRouting,
+  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, thinkingVisible, imageModalities, providerRouting, imageConfig,
 }: {
   req: Request;
   res: Response;
@@ -3108,6 +3182,7 @@ async function handleOpenAI({
   thinkingVisible?: boolean;
   imageModalities?: readonly string[];
   providerRouting?: Record<string, unknown>;
+  imageConfig?: Record<string, unknown>;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   const params: Parameters<typeof client.chat.completions.create>[0] = {
     model,
@@ -3121,6 +3196,7 @@ async function handleOpenAI({
   if (reasoning) paramsRecord["reasoning"] = reasoning;
   if (imageModalities) paramsRecord["modalities"] = imageModalities;
   if (providerRouting) paramsRecord["provider"] = providerRouting;
+  if (imageConfig && Object.keys(imageConfig).length > 0) paramsRecord["image_config"] = imageConfig;
 
   // Image models don't support streaming — always return non-streaming response
   // to avoid base64 content being split across SSE chunks incorrectly
