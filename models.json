@@ -40,6 +40,41 @@
       "description": "OpenAI model"
     },
     {
+      "model": "claude-opus-4-8",
+      "provider": "anthropic",
+      "actual_model": "claude-opus-4-8",
+      "description": "Anthropic Claude model",
+      "max_tokens": 128000,
+      "features": ["no_prefill"],
+      "pricing": [{ "min_tokens": 0, "input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.5 }],
+      "aliases": [
+        { "id": "claude-opus-4-8" },
+        {
+          "id": "claude-opus-4-8-thinking",
+          "description": "Extended thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "adaptive" },
+              "output_config": { "effort": "xhigh" }
+            }
+          }
+        },
+        {
+          "id": "claude-opus-4-8-300k-thinking",
+          "description": "Extended thinking with 300k output beta",
+          "max_tokens": 300000,
+          "features": ["visible_reasoning", "output_300k_beta"],
+          "headers": { "anthropic-beta": "output-300k-2026-03-24" },
+          "defaults": {
+            "anthropic": {
+              "thinking": { "type": "enabled", "effort": "max" }
+            }
+          }
+        }
+      ]
+    },
+    {
       "model": "claude-opus-4-7",
       "provider": "anthropic",
       "actual_model": "claude-opus-4-7",
@@ -466,6 +501,50 @@
       "actual_model": "google/gemini-2.5-pro"
     },
     {
+      "model": "anthropic/claude-opus-4.8",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.8",
+      "features": ["cache_control", "anthropic_messages_bridge"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true },
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "openrouter": {
+        "verbosity_effort_map": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "aliases": [
+        { "id": "anthropic/claude-opus-4.8" },
+        {
+          "id": "anthropic/claude-opus-4.8-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "anthropic/claude-opus-4.8-fast",
+      "provider": "openrouter",
+      "actual_model": "anthropic/claude-opus-4.8-fast",
+      "features": ["cache_control"],
+      "defaults": {
+        "openrouter": {
+          "provider": { "order": ["Bedrock"], "allow_fallbacks": true }
+        }
+      }
+    },
+    {
       "model": "anthropic/claude-opus-4.7",
       "provider": "openrouter",
       "actual_model": "anthropic/claude-opus-4.7",
@@ -633,6 +712,28 @@
         { "id": "z-ai/glm-5.1" },
         {
           "id": "z-ai/glm-5.1-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "qwen/qwen3.7-max",
+      "provider": "openrouter",
+      "actual_model": "qwen/qwen3.7-max",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "qwen/qwen3.7-max" },
+        {
+          "id": "qwen/qwen3.7-max-thinking",
           "features": ["visible_reasoning"],
           "defaults": {
             "openrouter": {
