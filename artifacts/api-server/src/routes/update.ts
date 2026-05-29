@@ -357,8 +357,14 @@ router.post("/update/apply", async (req: Request, res: Response) => {
       // Install dependencies
       await execFileAsync("pnpm", ["install", "--no-frozen-lockfile"], { cwd: WORKSPACE_ROOT });
 
-      // Exit → Workflow auto-restarts
-      setTimeout(() => process.exit(0), 500);
+      // Exit → Workflow auto-restarts or Supervisor reloads
+      setTimeout(() => {
+        if (process.send) {
+          process.send({ type: "reload" });
+        } else {
+          process.exit(0);
+        }
+      }, 500);
     } catch (err) {
       updateInProgress = false;
       console.error("[update] update failed:", err instanceof Error ? err.message : err);
@@ -398,7 +404,13 @@ router.post("/update/upload-file", async (req: Request, res: Response) => {
     });
 
     if (shouldRestart) {
-      setTimeout(() => process.exit(0), 500);
+      setTimeout(() => {
+        if (process.send) {
+          process.send({ type: "reload" });
+        } else {
+          process.exit(0);
+        }
+      }, 500);
     }
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Write failed" });
