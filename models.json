@@ -432,7 +432,11 @@
       "actual_model": "deepseek/deepseek-v4-flash",
       "defaults": {
         "openrouter": {
-          "reasoning": { "effort": "none" }
+          "reasoning": { "effort": "none" },
+          "provider": {
+            "order": ["DeepSeek"],
+            "allow_fallbacks": false
+          }
         }
       },
       "aliases": [
@@ -454,7 +458,11 @@
       "actual_model": "deepseek/deepseek-v4-pro",
       "defaults": {
         "openrouter": {
-          "reasoning": { "effort": "none" }
+          "reasoning": { "effort": "none" },
+          "provider": {
+            "order": ["DeepSeek"],
+            "allow_fallbacks": false
+          }
         }
       },
       "aliases": [
@@ -473,17 +481,41 @@
     {
       "model": "deepseek/deepseek-v3.2",
       "provider": "openrouter",
-      "actual_model": "deepseek/deepseek-v3.2"
+      "actual_model": "deepseek/deepseek-v3.2",
+      "defaults": {
+        "openrouter": {
+          "provider": {
+            "order": ["DeepSeek"],
+            "allow_fallbacks": false
+          }
+        }
+      }
     },
     {
       "model": "deepseek/deepseek-r1",
       "provider": "openrouter",
-      "actual_model": "deepseek/deepseek-r1"
+      "actual_model": "deepseek/deepseek-r1",
+      "defaults": {
+        "openrouter": {
+          "provider": {
+            "order": ["DeepSeek"],
+            "allow_fallbacks": false
+          }
+        }
+      }
     },
     {
       "model": "deepseek/deepseek-r1-0528",
       "provider": "openrouter",
-      "actual_model": "deepseek/deepseek-r1-0528"
+      "actual_model": "deepseek/deepseek-r1-0528",
+      "defaults": {
+        "openrouter": {
+          "provider": {
+            "order": ["DeepSeek"],
+            "allow_fallbacks": false
+          }
+        }
+      }
     },
     {
       "model": "mistralai/mistral-small-2603",

@@ -352,6 +352,45 @@ router.post("/update/apply", async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /update/upload-file — Upload a file and optionally restart the server
+// ---------------------------------------------------------------------------
+router.post("/update/upload-file", async (req: Request, res: Response) => {
+  if (!checkApiKey(req, res)) return;
+
+  const { path: relPath, content, restart } = req.body as { path?: string; content?: string; restart?: boolean };
+  if (!relPath || typeof content !== "string") {
+    res.status(400).json({ error: "path and content (string) are required" });
+    return;
+  }
+
+  // Prevent path traversal outside WORKSPACE_ROOT
+  const safePath = resolve(WORKSPACE_ROOT, relPath);
+  if (!safePath.startsWith(WORKSPACE_ROOT)) {
+    res.status(403).json({ error: "Path traversal detected" });
+    return;
+  }
+
+  try {
+    mkdirSync(dirname(safePath), { recursive: true });
+    writeFileSync(safePath, content, "utf8");
+
+    const shouldRestart = !!restart;
+    res.json({
+      ok: true,
+      path: relPath,
+      restarted: shouldRestart,
+      message: shouldRestart ? "File written, restarting server..." : "File written successfully",
+    });
+
+    if (shouldRestart) {
+      setTimeout(() => process.exit(0), 500);
+    }
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Write failed" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /update/status
 // ---------------------------------------------------------------------------
 
