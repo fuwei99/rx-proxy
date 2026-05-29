@@ -8,8 +8,4 @@ router.get("/healthz", (_req, res) => {
   res.json(data);
 });
 
-router.get("/check", (_req, res) => {
-  res.json({ status: "hot-reload-works", time: new Date().toISOString() });
-});
-
 export default router;
