@@ -16,10 +16,19 @@ const urls = [
 ];
 
 const apiKey = "wei123..";
-const backendBuildPath = path.join(WORKSPACE_ROOT, "artifacts/api-server/dist/index.mjs");
-const modelsPath = path.join(WORKSPACE_ROOT, "models.json");
 
 async function main() {
+  const targetFilter = process.argv[2];
+  const targetUrls = targetFilter
+    ? urls.filter((u) => u.toLowerCase().includes(targetFilter.toLowerCase()))
+    : urls;
+
+  if (targetUrls.length === 0) {
+    console.error(`❌ No matching URLs found in configuration for filter: "${targetFilter}"`);
+    console.log("Configured URLs:", urls);
+    process.exit(1);
+  }
+
   console.log("📦 Step 1: Building backend code locally...");
   try {
     execSync("pnpm --filter @workspace/api-server run build", { cwd: WORKSPACE_ROOT, stdio: "inherit" });
@@ -29,64 +38,48 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("\n📖 Reading compiled files...");
-  if (!fs.existsSync(backendBuildPath)) {
-    console.error(`❌ Build output not found at: ${backendBuildPath}`);
-    process.exit(1);
-  }
-  const backendContent = fs.readFileSync(backendBuildPath, "utf8");
-  const modelsContent = fs.readFileSync(modelsPath, "utf8");
+  // Files to upload
+  const filesToUpload = [
+    { path: "models.json", restart: false },
+    { path: "artifacts/api-server/src/routes/health.ts", restart: false },
+    { path: "artifacts/api-server/src/routes/update.ts", restart: false },
+    { path: "artifacts/api-server/dist/index.mjs", restart: true } // Restart on the last file
+  ];
 
-  for (const rawUrl of urls) {
+  for (const rawUrl of targetUrls) {
     const baseUrl = rawUrl.replace(/\/+$/, "");
-    console.log(`\n🚀 Uploading to: ${baseUrl}`);
+    console.log(`\n🚀 Uploading files to: ${baseUrl}`);
 
-    // 1. Upload models.json (no restart)
-    try {
-      const res = await fetch(`${baseUrl}/api/update/upload-file`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          path: "models.json",
-          content: modelsContent,
-          restart: false
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        console.log("   ✅ models.json uploaded");
-      } else {
-        console.log(`   ❌ models.json upload failed (${res.status}):`, data);
+    for (const file of filesToUpload) {
+      const fullPath = path.join(WORKSPACE_ROOT, file.path);
+      if (!fs.existsSync(fullPath)) {
+        console.warn(`   ⚠️ File not found, skipping: ${file.path}`);
+        continue;
       }
-    } catch (err) {
-      console.log(`   ❌ models.json upload error:`, err.message);
-    }
-
-    // 2. Upload backend dist/index.mjs (with restart)
-    try {
-      const res = await fetch(`${baseUrl}/api/update/upload-file`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          path: "artifacts/api-server/dist/index.mjs",
-          content: backendContent,
-          restart: true
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        console.log("   ✅ dist/index.mjs uploaded & restart triggered!");
-      } else {
-        console.log(`   ❌ dist/index.mjs upload failed (${res.status}):`, data);
+      
+      const content = fs.readFileSync(fullPath, "utf8");
+      try {
+        const res = await fetch(`${baseUrl}/api/update/upload-file`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            path: file.path,
+            content: content,
+            restart: file.restart
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          console.log(`   ✅ ${file.path} uploaded${file.restart ? " (restart triggered)" : ""}`);
+        } else {
+          console.log(`   ❌ ${file.path} upload failed (${res.status}):`, data);
+        }
+      } catch (err) {
+        console.log(`   ❌ ${file.path} upload error:`, err.message);
       }
-    } catch (err) {
-      console.log(`   ❌ dist/index.mjs upload error:`, err.message);
     }
   }
 

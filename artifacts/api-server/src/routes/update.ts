@@ -14,7 +14,22 @@ const execFileAsync = promisify(execFile);
 // Workspace root (monorepo root)
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_ROOT = resolve(process.cwd(), "../../");
+function findWorkspaceRoot(): string {
+  if (existsSync("/home/runner/workspace")) {
+    return "/home/runner/workspace";
+  }
+  let curr = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(join(curr, "pnpm-workspace.yaml"))) {
+      return curr;
+    }
+    const parent = dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return process.cwd();
+}
+const WORKSPACE_ROOT = findWorkspaceRoot();
 
 // ---------------------------------------------------------------------------
 // GitHub config — set UPDATE_CHECK_URL to GITHUB_RAW_VERSION_URL on sub-nodes
