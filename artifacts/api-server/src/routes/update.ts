@@ -378,7 +378,12 @@ router.post("/update/apply", async (req: Request, res: Response) => {
 router.post("/update/upload-file", async (req: Request, res: Response) => {
   if (!checkApiKey(req, res)) return;
 
-  const { path: relPath, content, restart } = req.body as { path?: string; content?: string; restart?: boolean };
+  const { path: relPath, content, encoding, restart } = req.body as {
+    path?: string;
+    content?: string;
+    encoding?: "utf8" | "base64";
+    restart?: boolean;
+  };
   if (!relPath || typeof content !== "string") {
     res.status(400).json({ error: "path and content (string) are required" });
     return;
@@ -393,7 +398,11 @@ router.post("/update/upload-file", async (req: Request, res: Response) => {
 
   try {
     mkdirSync(dirname(safePath), { recursive: true });
-    writeFileSync(safePath, content, "utf8");
+    if (encoding === "base64") {
+      writeFileSync(safePath, Buffer.from(content, "base64"));
+    } else {
+      writeFileSync(safePath, content, "utf8");
+    }
 
     const shouldRestart = !!restart;
     res.json({
