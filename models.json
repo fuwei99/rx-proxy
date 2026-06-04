@@ -428,6 +428,58 @@
       ]
     },
     {
+      "model": "tencent/hy3-preview",
+      "provider": "openrouter",
+      "actual_model": "tencent/hy3-preview",
+      "pricing": [{ "min_tokens": 0, "input": 0.063, "output": 0.21 }],
+      "aliases": [
+        {
+          "id": "tencent/hy3-preview",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "tencent/hy3-preview-low",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "tencent/hy3-preview-medium",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "medium" }
+            }
+          }
+        },
+        {
+          "id": "tencent/hy3-preview-high",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "high" }
+            }
+          }
+        },
+        {
+          "id": "tencent/hy3-preview-nothinking",
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "none" }
+            }
+          }
+        }
+      ]
+    },
+    {
       "model": "x-ai/grok-4.20",
       "provider": "openrouter",
       "actual_model": "x-ai/grok-4.20"
