@@ -76,6 +76,11 @@ const GEMINI_MODELS: ModelEntry[] = [
 ];
 
 const OPENROUTER_MODELS: ModelEntry[] = [
+  { id: "x-ai/grok-4.3", label: "Grok 4.3", provider: "openrouter", desc: "xAI 旗舰推理模型（默认低思考）", badge: "thinking-visible" },
+  { id: "x-ai/grok-4.3-low", label: "Grok 4.3 Low", provider: "openrouter", desc: "xAI 旗舰推理模型（低思考）", badge: "thinking-visible" },
+  { id: "x-ai/grok-4.3-medium", label: "Grok 4.3 Medium", provider: "openrouter", desc: "xAI 旗舰推理模型（中思考）", badge: "thinking-visible" },
+  { id: "x-ai/grok-4.3-high", label: "Grok 4.3 High", provider: "openrouter", desc: "xAI 旗舰推理模型（高思考）", badge: "thinking-visible" },
+  { id: "x-ai/grok-4.3-nothinking", label: "Grok 4.3 No Thinking", provider: "openrouter", desc: "xAI 旗舰推理模型（不思考）", badge: "tools" },
   { id: "x-ai/grok-4.20", label: "Grok 4.20", provider: "openrouter", desc: "xAI 最新旗舰推理模型", badge: "tools" },
   { id: "x-ai/grok-4.1-fast", label: "Grok 4.1 Fast", provider: "openrouter", desc: "xAI 高速对话模型", badge: "tools" },
   { id: "x-ai/grok-4-fast", label: "Grok 4 Fast", provider: "openrouter", desc: "xAI 快速模型", badge: "tools" },

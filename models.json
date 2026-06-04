@@ -376,6 +376,58 @@
     },
 
     {
+      "model": "x-ai/grok-4.3",
+      "provider": "openrouter",
+      "actual_model": "x-ai/grok-4.3",
+      "pricing": [{ "min_tokens": 0, "input": 1.25, "output": 2.50 }],
+      "aliases": [
+        {
+          "id": "x-ai/grok-4.3",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "x-ai/grok-4.3-low",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "low" }
+            }
+          }
+        },
+        {
+          "id": "x-ai/grok-4.3-medium",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "medium" }
+            }
+          }
+        },
+        {
+          "id": "x-ai/grok-4.3-high",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "high" }
+            }
+          }
+        },
+        {
+          "id": "x-ai/grok-4.3-nothinking",
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "effort": "none" }
+            }
+          }
+        }
+      ]
+    },
+    {
       "model": "x-ai/grok-4.20",
       "provider": "openrouter",
       "actual_model": "x-ai/grok-4.20"
