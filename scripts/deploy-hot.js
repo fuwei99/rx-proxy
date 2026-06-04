@@ -8,11 +8,17 @@ const __dirname = path.dirname(__filename);
 const WORKSPACE_ROOT = path.resolve(__dirname, "..");
 
 const urls = [
-  "https://api-timigogohehe.replit.app/",
   "https://api-keitroyuki.replit.app",
   "https://api-yoichihiro9.replit.app/",
   "https://api-biden2028win.replit.app/",
-  "https://api-integrations-chenhongji1218.replit.app"
+  "https://api-lovevertex159.replit.app/",
+  "https://api-zhangbeihai167.replit.app/",
+  "https://api-hiroyoichi1.replit.app/",
+  "https://api-keitrohiro.replit.app/",
+  "https://api-huangyuqihyq123.replit.app/",
+  "https://api-integrations-chengtianying23.replit.app/",
+  "https://api-timigogohehe.replit.app/",
+  "https://api-integrations-chenhongji1218.replit.app/"
 ];
 
 const apiKey = "wei123..";
@@ -56,7 +62,7 @@ async function main() {
 
   console.log("\n📦 Step 2: Building frontend (dashboard) locally...");
   try {
-    execSync("pnpm --filter @workspace/api-portal run build", { cwd: WORKSPACE_ROOT, stdio: "inherit" });
+    execSync("pnpm --filter @workspace/api-portal run build", { cwd: WORKSPACE_ROOT, stdio: "inherit", env: { ...process.env, PORT: process.env.PORT || "3000", BASE_PATH: process.env.BASE_PATH || "/" } });
     console.log("✅ Frontend build successful!");
   } catch (err) {
     console.error("❌ Frontend build failed:", err.message);
@@ -71,6 +77,7 @@ async function main() {
   filesToUpload.push({ path: "artifacts/api-server/src/routes/health.ts", restart: false });
   filesToUpload.push({ path: "artifacts/api-server/src/routes/update.ts", restart: false });
   filesToUpload.push({ path: "artifacts/api-server/src/index.ts", restart: false });
+  filesToUpload.push({ path: "artifacts/api-server/src/routes/proxy.ts", restart: false });
 
   // 2. Scan and add all backend dist files (excluding index.mjs which we want to upload last to restart)
   const backendDistDir = path.join(WORKSPACE_ROOT, "artifacts/api-server/dist");

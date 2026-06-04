@@ -776,6 +776,28 @@
       ]
     },
     {
+      "model": "qwen/qwen3.7-plus",
+      "provider": "openrouter",
+      "actual_model": "qwen/qwen3.7-plus",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "qwen/qwen3.7-plus" },
+        {
+          "id": "qwen/qwen3.7-plus-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
       "model": "qwen/qwen3.6-plus",
       "provider": "openrouter",
       "actual_model": "qwen/qwen3.6-plus",
@@ -810,6 +832,28 @@
         { "id": "qwen/qwen3.6-max-preview" },
         {
           "id": "qwen/qwen3.6-max-preview-thinking",
+          "features": ["visible_reasoning"],
+          "defaults": {
+            "openrouter": {
+              "reasoning": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "minimax/minimax-m3",
+      "provider": "openrouter",
+      "actual_model": "minimax/minimax-m3",
+      "defaults": {
+        "openrouter": {
+          "reasoning": { "effort": "none" }
+        }
+      },
+      "aliases": [
+        { "id": "minimax/minimax-m3" },
+        {
+          "id": "minimax/minimax-m3-thinking",
           "features": ["visible_reasoning"],
           "defaults": {
             "openrouter": {

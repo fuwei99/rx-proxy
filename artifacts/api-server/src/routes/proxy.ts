@@ -3005,7 +3005,7 @@ async function handleFriendProxy({
   tools?: OAITool[];
   toolChoice?: unknown;
   startTime: number;
-}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
+}): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number; usage?: ExtendedUsageMetrics }> {
   const body: Record<string, unknown> = { model, messages, stream };
   body["max_tokens"] = maxTokens ?? 16000; // always override sub-node's potentially low default
   if (stream) body["stream_options"] = { include_usage: true };
@@ -3025,9 +3025,34 @@ async function handleFriendProxy({
       throw new FriendProxyHttpError(fetchRes.status, `Friend proxy error ${fetchRes.status}: ${errText}`);
     }
     const json = await fetchRes.json() as Record<string, unknown>;
+    // Extract usage details from headers if available (propagated from subnode)
+    const headerCost = fetchRes.headers.get("x-proxy-cost-usd");
+    const headerCached = fetchRes.headers.get("x-proxy-tokens-cached");
+    const headerCacheWrite = fetchRes.headers.get("x-proxy-tokens-cache-write");
+    const headerReasoning = fetchRes.headers.get("x-proxy-tokens-reasoning");
+    const headerPrompt = fetchRes.headers.get("x-proxy-tokens-prompt");
+    const headerCompletion = fetchRes.headers.get("x-proxy-tokens-completion");
+
+    let usage: ExtendedUsageMetrics | undefined;
+    if (headerPrompt || headerCompletion || headerCost || headerCached || headerReasoning) {
+      usage = {
+        totalTokens: (readFiniteNumber(headerPrompt) ?? 0) + (readFiniteNumber(headerCompletion) ?? 0),
+        costUsd: readFiniteNumber(headerCost),
+        cachedTokens: readFiniteNumber(headerCached),
+        cacheWriteTokens: readFiniteNumber(headerCacheWrite),
+        reasoningTokens: readFiniteNumber(headerReasoning),
+      };
+    } else {
+      usage = extractExtendedUsageMetrics(json["usage"]);
+    }
+
+    const pTok = readFiniteNumber(headerPrompt) ?? (json["usage"] as any)?.prompt_tokens ?? 0;
+    const cTok = readFiniteNumber(headerCompletion) ?? (json["usage"] as any)?.completion_tokens ?? 0;
+
+    setUsageHeaders(res, pTok, cTok, usage);
     res.json(json);
-    const usage = json["usage"] as { prompt_tokens?: number; completion_tokens?: number } | null | undefined;
-    if ((usage?.prompt_tokens ?? 0) === 0) {
+
+    if (pTok === 0) {
       const inputChars = messages.reduce((acc, m) => {
         if (typeof m.content === "string") return acc + m.content.length;
         if (Array.isArray(m.content))
@@ -3036,9 +3061,9 @@ async function handleFriendProxy({
         return acc;
       }, 0);
       const outputChars = (json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content?.length ?? 0;
-      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputChars / 4) };
+      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputChars / 4), usage };
     }
-    return { promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0 };
+    return { promptTokens: pTok, completionTokens: cTok, usage };
   }
 
   // ── Streaming ────────────────────────────────────────────────────────────
@@ -3059,6 +3084,7 @@ async function handleFriendProxy({
     req.log.info("Friend returned JSON for stream request — fake-streaming");
     const json = await fetchRes.json() as Record<string, unknown>;
     const result = await fakeStreamResponse(res, json, startTime);
+    const usage = extractExtendedUsageMetrics(json["usage"]);
     if (result.promptTokens === 0) {
       const inputChars = messages.reduce((acc, m) => {
         if (typeof m.content === "string") return acc + m.content.length;
@@ -3068,9 +3094,9 @@ async function handleFriendProxy({
         return acc;
       }, 0);
       const outputContent = ((json["choices"] as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? "").length;
-      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputContent / 4), ttftMs: result.ttftMs };
+      return { promptTokens: Math.ceil(inputChars / 4), completionTokens: Math.ceil(outputContent / 4), ttftMs: result.ttftMs, usage };
     }
-    return result;
+    return { ...result, usage };
   }
 
   setSseHeaders(res);
@@ -3080,6 +3106,7 @@ async function handleFriendProxy({
   let completionTokens = 0;
   let ttftMs: number | undefined;
   let outputChars = 0;
+  let usage: ExtendedUsageMetrics | undefined;
 
   try {
 
@@ -3103,10 +3130,18 @@ async function handleFriendProxy({
           try {
             const chunk = JSON.parse(data) as Record<string, unknown>;
             // Capture usage from any chunk that carries it
-            const usage = chunk["usage"] as { prompt_tokens?: number; completion_tokens?: number } | null | undefined;
-            if (usage && typeof usage === "object") {
-              promptTokens = usage.prompt_tokens ?? promptTokens;
-              completionTokens = usage.completion_tokens ?? completionTokens;
+            const chunkUsage = chunk["usage"];
+            if (chunkUsage && typeof chunkUsage === "object") {
+              const parsed = extractExtendedUsageMetrics(chunkUsage);
+              if (parsed) {
+                promptTokens = (chunkUsage as any).prompt_tokens ?? promptTokens;
+                completionTokens = (chunkUsage as any).completion_tokens ?? completionTokens;
+                usage = { ...usage, ...parsed };
+              } else {
+                promptTokens = (chunkUsage as any).prompt_tokens ?? promptTokens;
+                completionTokens = (chunkUsage as any).completion_tokens ?? completionTokens;
+              }
+
             }
             // Record TTFT + accumulate output chars for fallback estimation
             const deltaContent = (chunk["choices"] as Array<{ delta?: { content?: string } }>)?.[0]?.delta?.content;
@@ -3140,7 +3175,7 @@ async function handleFriendProxy({
     completionTokens = Math.ceil(outputChars / 4);
   }
 
-  return { promptTokens, completionTokens, ttftMs };
+  return { promptTokens, completionTokens, ttftMs, usage };
 }
 
 function normalizeImageResponse(result: Record<string, unknown>): void {
@@ -3205,8 +3240,10 @@ async function handleOpenAI({
     const resultRecord = result as unknown as Record<string, unknown>;
     normalizeImageResponse(resultRecord);
     logResponseDebug(req, "OpenAI non-stream response (image stream fallback)", result);
-    res.json(result);
     const usage = extractExtendedUsageMetrics(result.usage);
+    setUsageHeaders(res, result.usage?.prompt_tokens ?? 0, result.usage?.completion_tokens ?? 0, usage);
+    res.json(result);
+
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
       completionTokens: result.usage?.completion_tokens ?? 0,
@@ -3275,8 +3312,10 @@ async function handleOpenAI({
     // Image models: normalize message.images[] → message.content[] image_url parts
     if (imageModalities) normalizeImageResponse(resultRecord);
     logResponseDebug(req, "OpenAI non-stream response", result);
-    res.json(result);
     const usage = extractExtendedUsageMetrics(result.usage);
+    setUsageHeaders(res, result.usage?.prompt_tokens ?? 0, result.usage?.completion_tokens ?? 0, usage);
+    res.json(result);
+
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
       completionTokens: result.usage?.completion_tokens ?? 0,
@@ -3367,9 +3406,14 @@ async function handleOpenRouterFetch({
       }
     }
     logResponseDebug(req, "OpenRouter fetch non-stream response", result);
-    res.json(result);
+
+
+
+
     const usage = extractExtendedUsageMetrics(result.usage);
     const usageRecord = (result.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined) ?? {};
+    setUsageHeaders(res, usageRecord.prompt_tokens ?? 0, usageRecord.completion_tokens ?? 0, usage);
+    res.json(result);
     return {
       promptTokens: usageRecord.prompt_tokens ?? 0,
       completionTokens: usageRecord.completion_tokens ?? 0,
@@ -3476,6 +3520,18 @@ function extractGeminiUsageMetrics(usage: unknown): ExtendedUsageMetrics | undef
   return metrics;
 }
 
+function setUsageHeaders(res: Response, prompt: number, completion: number, usage?: ExtendedUsageMetrics) {
+  if (res.headersSent) return;
+  res.setHeader("X-Proxy-Tokens-Prompt", String(prompt));
+  res.setHeader("X-Proxy-Tokens-Completion", String(completion));
+  if (usage) {
+    if (usage.costUsd !== undefined) res.setHeader("X-Proxy-Cost-Usd", String(usage.costUsd));
+    if (usage.cachedTokens !== undefined) res.setHeader("X-Proxy-Tokens-Cached", String(usage.cachedTokens));
+    if (usage.cacheWriteTokens !== undefined) res.setHeader("X-Proxy-Tokens-Cache-Write", String(usage.cacheWriteTokens));
+    if (usage.reasoningTokens !== undefined) res.setHeader("X-Proxy-Tokens-Reasoning", String(usage.reasoningTokens));
+  }
+}
+
 function applyGeminiDefaultThinkingConfig(body: unknown, alias: GeminiModelAlias): Record<string, unknown> {
   const source = readRecord(body) ?? {};
   const generationConfig = readRecord(source.generationConfig);
@@ -3525,11 +3581,13 @@ async function handleGeminiNative({
       data = {};
     }
     logResponseDebug(req, "Gemini native response", data);
-    res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(text);
-
     const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
     const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
-    return { promptTokens, completionTokens, usage: extractGeminiUsageMetrics(data.usageMetadata) };
+    const usage = extractGeminiUsageMetrics(data.usageMetadata);
+    setUsageHeaders(res, promptTokens, completionTokens, usage);
+    res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(text);
+
+    return { promptTokens, completionTokens, usage };
   }
 
   const url = `${baseUrl}/models/${alias.actualModel}:streamGenerateContent?alt=sse`;
@@ -3734,6 +3792,8 @@ async function handleGemini({
     const message: Record<string, string> = { role: "assistant", content: answer };
     if (reasoning) message.reasoning_content = reasoning;
 
+    const usage = extractGeminiUsageMetrics(data.usageMetadata);
+    setUsageHeaders(res, promptTokens, completionTokens, usage);
     res.json({
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
@@ -3742,7 +3802,7 @@ async function handleGemini({
       choices: [{ index: 0, message, finish_reason: "stop" }],
       usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
     });
-    return { promptTokens, completionTokens, usage: extractGeminiUsageMetrics(data.usageMetadata) };
+    return { promptTokens, completionTokens, usage };
   }
 }
 
@@ -3983,11 +4043,13 @@ async function handleClaude({
       },
     };
     logResponseDebug(req, "Claude OpenAI-compatible response", responseJson);
+    const usage = extractAnthropicUsageMetrics(result.usage);
+    setUsageHeaders(res, result.usage.input_tokens, result.usage.output_tokens, usage);
     res.json(responseJson);
     return {
       promptTokens: result.usage.input_tokens,
       completionTokens: result.usage.output_tokens,
-      usage: extractAnthropicUsageMetrics(result.usage),
+      usage,
     };
   }
 }
